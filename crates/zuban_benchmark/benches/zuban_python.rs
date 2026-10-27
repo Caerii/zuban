@@ -1,6 +1,9 @@
+use std::time::{Duration, Instant};
+
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 use config::ProjectOptions;
+use parsa_python_cst::Tree;
 use vfs::{LocalFS, PathWithScheme, VfsHandler};
 use zuban_python::{Project, RunCause};
 
@@ -82,7 +85,76 @@ fn prepare_reusable_project() -> (Project, ProjectOptions) {
     (base, options)
 }
 
+fn bench_warm_edit_stage(c: &mut Criterion, name: &str, measure_update: bool) {
+    let (mut project, paths) = prepare_independent_files(1000);
+    check_prepared_files(&mut project, paths.clone());
+    let edited_path = paths[0].clone();
+    let original = utils::dedent(
+        r#"
+        def foo(x: int) -> int:
+            return x
+    "#,
+    )
+    .into_boxed_str();
+    let updated = utils::dedent(
+        r#"
+        def foo(x: int) -> int:
+            return "wrong"
+    "#,
+    )
+    .into_boxed_str();
+    let mut use_updated = false;
+    c.bench_function(name, |b| {
+        b.iter_custom(|iters| {
+            let mut measured = Duration::ZERO;
+            for _ in 0..iters {
+                use_updated = !use_updated;
+                let code = if use_updated { &updated } else { &original };
+                let update_start = Instant::now();
+                project.store_in_memory_file(edited_path.clone(), code.clone());
+                let update_time = update_start.elapsed();
+                let mut document = project.document(&edited_path).unwrap();
+                let check_start = Instant::now();
+                let diagnostics = document.diagnostics();
+                let check_time = check_start.elapsed();
+                assert_eq!(diagnostics.len(), usize::from(use_updated));
+                std::hint::black_box(diagnostics);
+                measured += if measure_update {
+                    update_time
+                } else {
+                    check_time
+                };
+            }
+            measured
+        })
+    });
+}
+
 fn bench_type_checking(c: &mut Criterion) {
+    let small_code = utils::dedent(
+        r#"
+        def foo(x: int) -> int:
+            return "wrong"
+    "#,
+    )
+    .into_boxed_str();
+    c.bench_function("parse edited small file", |b| {
+        b.iter(|| std::hint::black_box(Tree::parse(small_code.clone())))
+    });
+    let (mut unchanged_project, unchanged_paths) = prepare_independent_files(1000);
+    let unchanged_path = unchanged_paths[0].clone();
+    let unchanged_code = utils::dedent(
+        r#"
+        def foo(x: int) -> int:
+            return x
+    "#,
+    )
+    .into_boxed_str();
+    c.bench_function("store unchanged file among 1000", |b| {
+        b.iter(|| {
+            unchanged_project.store_in_memory_file(unchanged_path.clone(), unchanged_code.clone())
+        })
+    });
     c.bench_function("project setup", |b| {
         b.iter(|| {
             let mut options = ProjectOptions::default();
@@ -146,6 +218,8 @@ fn bench_type_checking(c: &mut Criterion) {
             std::hint::black_box(diagnostics);
         })
     });
+    bench_warm_edit_stage(c, "edit stage of 1 of 1000 prepared files", true);
+    bench_warm_edit_stage(c, "check stage of 1 of 1000 prepared files", false);
 }
 
 // Register the benchmarks
