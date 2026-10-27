@@ -210,6 +210,15 @@ struct CommonProject {
     diagnostics: DiagnosticConfig,
 }
 
+#[derive(Eq, Hash, PartialEq)]
+struct FlagProjectKey {
+    file_name: String,
+    from_mypy_test_suite: bool,
+    mypy_compatible: bool,
+    no_empty: bool,
+    flags: Vec<String>,
+}
+
 impl TestCase<'_, '_> {
     fn initialize_flags<'p>(
         &self,
@@ -219,6 +228,7 @@ impl TestCase<'_, '_> {
         mut flags: PerTestFlags,
         steps: &[Step],
         common_slot: Option<usize>,
+        flag_project_key: Option<FlagProjectKey>,
     ) -> (OwnedOrMut<'p, Project>, DiagnosticConfig) {
         if let Some(slot) = common_slot
             && let Some(entry) = projects
@@ -373,6 +383,15 @@ impl TestCase<'_, '_> {
             OwnedOrMut::Owned(projects.try_to_reuse_project_parts(project_options))
         } else {
             let index = projects.get_or_create_index(settings, config);
+            if let Some(key) = flag_project_key {
+                projects.flag_projects.insert(
+                    key,
+                    CommonProject {
+                        index,
+                        diagnostics: diagnostic_config,
+                    },
+                );
+            }
             if let Some(slot) = common_slot {
                 projects
                     .common_projects
@@ -395,11 +414,11 @@ impl TestCase<'_, '_> {
             && !self.code.starts_with("# pkgs:"))
         .then_some((mode == Mode::Mypy) as usize * 2 + self.name.ends_with("_no_empty") as usize);
         // Avoid parsing, because it's pretty slow and let's not do it if not strictly necessary.
-        let flags = if steps.flags.is_empty() {
+        let flags_key: Vec<String> = steps.flags.iter().map(|flag| (*flag).to_owned()).collect();
+        let flags = if flags_key.is_empty() {
             PerTestFlags::default()
         } else {
-            let key: Vec<String> = steps.flags.iter().map(|flag| (*flag).to_owned()).collect();
-            if let Some(cached) = projects.flags_cache.get(&key) {
+            if let Some(cached) = projects.flags_cache.get(&flags_key) {
                 cached.clone()
             } else {
                 // Reuse the Command, then cache the parsed value for identical fixture flags.
@@ -407,7 +426,9 @@ impl TestCase<'_, '_> {
                     .command
                     .try_get_matches_from_mut(std::iter::once("").chain(steps.flags.into_iter()))?;
                 let parsed = PerTestFlags::from_arg_matches(&matches)?;
-                projects.flags_cache.insert(key, parsed.clone());
+                projects
+                    .flags_cache
+                    .insert(flags_key.clone(), parsed.clone());
                 parsed
             }
         };
@@ -429,17 +450,42 @@ impl TestCase<'_, '_> {
         }
         let local_fs = SimpleLocalFS::without_watcher();
         let no_typecheck = flags.no_typecheck;
-        let (mut project, diagnostic_config) = self.initialize_flags(
-            projects,
-            &local_fs,
-            match flags.cli.mode {
-                Some(mode) => mode.into(),
-                None => ModeChoice::Explicit(mode),
-            },
-            flags,
-            &steps,
-            common_slot,
-        );
+        // A flag-bearing case can share the resolved project and diagnostic settings with
+        // another case from the same fixture. Config files and package directives can vary by
+        // case, so those continue through the full setup path.
+        let flag_project_key = (!flags_key.is_empty()
+            && !steps[0].files.contains_key("mypy.ini")
+            && !steps[0].files.contains_key("pyproject.toml")
+            && !self.code.starts_with("# pkgs:"))
+        .then(|| FlagProjectKey {
+            file_name: self.file_name.to_owned(),
+            from_mypy_test_suite: self.from_mypy_test_suite,
+            mypy_compatible: mode == Mode::Mypy,
+            no_empty: self.name.ends_with("_no_empty"),
+            flags: flags_key,
+        });
+        let cached_flag_project = flag_project_key
+            .as_ref()
+            .and_then(|key| projects.flag_projects.get(key).copied());
+        let (mut project, diagnostic_config) = if let Some(cached) = cached_flag_project {
+            (
+                OwnedOrMut::Mut(&mut projects.projects[cached.index]),
+                cached.diagnostics,
+            )
+        } else {
+            self.initialize_flags(
+                projects,
+                &local_fs,
+                match flags.cli.mode {
+                    Some(mode) => mode.into(),
+                    None => ModeChoice::Explicit(mode),
+                },
+                flags,
+                &steps,
+                common_slot,
+                flag_project_key,
+            )
+        };
 
         let is_parse_test = self.file_name.starts_with("parse");
         let is_semanal_test = self.file_name.starts_with("semanal-");
@@ -983,6 +1029,7 @@ struct ProjectsCache {
     map: FastHashMap<(Settings, TypeCheckerFlags), usize>,
     projects: Vec<Project>,
     common_projects: FastHashMap<String, [Option<CommonProject>; 4]>,
+    flag_projects: FastHashMap<FlagProjectKey, CommonProject>,
     run_cause: RunCause,
     flags_cache: FastHashMap<Vec<String>, PerTestFlags>,
 }
@@ -1015,6 +1062,7 @@ impl ProjectsCache {
             map: Default::default(),
             projects: Vec::new(),
             common_projects: FastHashMap::default(),
+            flag_projects: FastHashMap::default(),
         }
     }
 
