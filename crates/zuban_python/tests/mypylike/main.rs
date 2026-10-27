@@ -783,6 +783,9 @@ fn maybe_parent(local_fs: &SimpleLocalFS, code: &str) -> Option<PathWithScheme> 
 }
 
 fn add_inline_errors(wanted: &mut Vec<String>, path: &str, code: &str, from_mypy_test_suite: bool) {
+    if !code.contains("# E:") && !code.contains("# N:") {
+        return;
+    }
     let lines: Box<_> = code.split('\n').collect();
     for (line_nr, column, mut type_, comment) in
         ErrorCommentsOnCode(&lines, lines.iter().enumerate())
@@ -1068,7 +1071,15 @@ fn main() -> ExitCode {
 
     let skipped = skipped();
 
-    let files = find_mypy_style_files();
+    let files: Vec<_> = find_mypy_style_files()
+        .into_iter()
+        .map(|(from_mypy_test_suite, file)| {
+            let code = read_to_string(&file).unwrap();
+            let code = REPLACE_COMMENTS.replace_all(&code, "").into_owned();
+            let file_name = file.file_stem().unwrap().to_str().unwrap().to_owned();
+            (from_mypy_test_suite, file_name, code)
+        })
+        .collect();
 
     let mut error_count = 0;
     if !cli_args.only_language_server {
@@ -1096,7 +1107,7 @@ fn main() -> ExitCode {
 fn run(
     cli_args: &CliArgs,
     run_cause: RunCause,
-    files: &[(bool, PathBuf)],
+    files: &[(bool, String, String)],
     skipped: &SkippedIndex,
     filters: &[&str],
 ) -> usize {
@@ -1109,15 +1120,11 @@ fn run(
     let mut error_summary = String::new();
     let mut allowed_to_run_when_start_at = false;
     let mut timings = Timings::new(cli_args.slowest.unwrap_or_default());
-    for (from_mypy_test_suite, file) in files {
-        let code = read_to_string(file).unwrap();
-        let code = REPLACE_COMMENTS.replace_all(&code, "");
-        let stem = file.file_stem().unwrap().to_owned();
-        let file_name = stem.to_str().unwrap();
-        for case in mypy_style_cases(file_name, &code, *from_mypy_test_suite) {
+    for (from_mypy_test_suite, file_name, code) in files {
+        for case in mypy_style_cases(file_name, code, *from_mypy_test_suite) {
             if !filters.is_empty()
                 && !filters.contains(&&*case.name)
-                && !filters.contains(&file_name)
+                && !filters.contains(&file_name.as_str())
             {
                 continue;
             }
