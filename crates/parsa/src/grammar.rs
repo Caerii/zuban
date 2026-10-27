@@ -631,8 +631,8 @@ impl<'a> Stack<'a> {
             stack_nodes: vec![],
             tree_nodes: vec![],
         };
-        // Just reserve enough so the vec contents don't need to be copied.
-        stack.stack_nodes.reserve(128);
+        // Most parses stay shallow; let unusually deep syntax grow the stack.
+        stack.stack_nodes.reserve(32);
         // TODO need some research in how much we should reserve.
         stack.tree_nodes.reserve(string_len / 4);
         stack.push(node_id, 0, dfa_state, 0, ModeData::LL, 0, false);

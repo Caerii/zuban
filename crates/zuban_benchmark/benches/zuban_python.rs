@@ -262,6 +262,25 @@ fn bench_type_checking(c: &mut Criterion) {
     c.bench_function("parse edited small file", |b| {
         b.iter(|| std::hint::black_box(Tree::parse(small_code.clone())))
     });
+    let assignments = (0..100)
+        .map(|i| format!("x{i} = {i}\n"))
+        .collect::<Vec<_>>()
+        .concat()
+        .into_boxed_str();
+    c.bench_function("parse 100 assignments", |b| {
+        b.iter(|| std::hint::black_box(Tree::parse(assignments.clone())))
+    });
+    let comments = "# a comment\n".repeat(100).into_boxed_str();
+    c.bench_function("parse 100 comments", |b| {
+        b.iter(|| std::hint::black_box(Tree::parse(comments.clone())))
+    });
+    for depth in [10, 25, 50] {
+        let nested = format!("x = {}1{}\n", "(".repeat(depth), ")".repeat(depth)).into_boxed_str();
+        let name = format!("parse {depth} nested parentheses");
+        c.bench_function(&name, |b| {
+            b.iter(|| std::hint::black_box(Tree::parse(nested.clone())))
+        });
+    }
     let (mut unchanged_project, unchanged_paths) = prepare_independent_files(1000);
     let unchanged_path = unchanged_paths[0].clone();
     let unchanged_code = utils::dedent(

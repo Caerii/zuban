@@ -307,8 +307,10 @@ create_grammar!(
     // To avoid multiple alternative nodes we create a simple separate node
     slice_like:? named_expression !":" | slice
     slice: expression? ":" expression? [":" expression?]
+    // Parse a grouped expression before a tuple: tuples require a comma, and
+    // trying them first replays every nested expression when no comma follows.
     atom:
-          "(" [tuple_content | yield_expr | named_expression | comprehension] ")"
+          "(" [yield_expr | named_expression | tuple_content | comprehension] ")"
         | "[" [star_named_expressions | comprehension] "]"
         | "{" [dict_content | star_named_expressions | dict_comprehension | comprehension] "}"
         | Name | Number | strings | bytes | "..." | "None" | "True" | "False"
@@ -471,6 +473,29 @@ mod tests {
             root_node.type_(),
             PyNodeType::Nonterminal(NonterminalType::file)
         );
+    }
+
+    #[test]
+    fn test_parenthesized_expression_alternatives() {
+        for expression in [
+            "()",
+            "(x)",
+            "((x))",
+            "(x,)",
+            "(*xs,)",
+            "(x for x in xs)",
+            "(x := 1)",
+        ] {
+            let code = format!("result = {expression}\n");
+            let tree = parse(code.clone().into_boxed_str());
+            assert!(
+                tree.internal_tree
+                    .nodes
+                    .iter()
+                    .all(|node| !node.type_.is_error_recovery()),
+                "Unexpected error node in {code}"
+            );
+        }
     }
 
     #[test]
