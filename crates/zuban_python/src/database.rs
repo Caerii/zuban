@@ -1512,6 +1512,27 @@ impl Database {
     }
 
     pub fn close_in_memory_file(&mut self, path: &PathWithScheme) -> Result<(), &'static str> {
+        let result = self.close_in_memory_file_without_db_invalidation(path)?;
+        self.handle_invalidation(result);
+        Ok(())
+    }
+
+    pub fn close_in_memory_files(&mut self, paths: &[PathWithScheme]) {
+        let mut invalidation = InvalidationResult::InvalidatedFiles;
+        for path in paths {
+            if self.vfs.has_in_memory_path(path) {
+                invalidation |= self
+                    .close_in_memory_file_without_db_invalidation(path)
+                    .expect("Known in-memory path must be closable");
+            }
+        }
+        self.handle_invalidation(invalidation);
+    }
+
+    fn close_in_memory_file_without_db_invalidation(
+        &mut self,
+        path: &PathWithScheme,
+    ) -> Result<InvalidationResult, &'static str> {
         if let Some(in_mem) = self.vfs.in_memory_file(path) {
             for separate_file in self
                 .vfs
@@ -1544,8 +1565,7 @@ impl Database {
                 .vfs
                 .has_in_memory_typeshed_files(self.project.flags.case_sensitive);
         }
-        self.handle_invalidation(result);
-        Ok(())
+        Ok(result)
     }
 
     pub fn invalidate_path(&mut self, path: &AbsPath) {

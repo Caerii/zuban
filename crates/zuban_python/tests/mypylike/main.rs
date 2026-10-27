@@ -600,6 +600,10 @@ impl TestCase<'_, '_> {
                 break;
             }
         }
+        let mut flat_files = Vec::new();
+        let mut seen_flat_files = FastHashSet::default();
+        let mut directories = Vec::new();
+        let mut seen_directories = FastHashSet::default();
         for step in &steps {
             for path in step.files.keys() {
                 // We need to unload the whole directory, otherwise we might leave up namespace
@@ -608,14 +612,17 @@ impl TestCase<'_, '_> {
                 // Somehow all tests use `/` paths, and I haven't seen backslashes (for Windows)
                 if path.contains('/') {
                     let before_slash = path.split('/').next().unwrap();
-                    let _ = project.delete_directory_of_in_memory_files(&base_path_join(
-                        &local_fs,
-                        before_slash,
-                    ));
-                } else {
-                    let _ = project.close_in_memory_file(&base_path_join(&local_fs, path));
+                    if seen_directories.insert(before_slash) {
+                        directories.push(base_path_join(&local_fs, before_slash));
+                    }
+                } else if seen_flat_files.insert(*path) {
+                    flat_files.push(base_path_join(&local_fs, path));
                 }
             }
+        }
+        project.close_in_memory_files(&flat_files);
+        for directory in directories {
+            let _ = project.delete_directory_of_in_memory_files(&directory);
         }
         result
     }

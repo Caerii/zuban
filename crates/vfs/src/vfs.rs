@@ -417,6 +417,10 @@ impl<F: VfsFile> Vfs<F> {
         }
     }
 
+    pub fn has_in_memory_path(&self, path: &PathWithScheme) -> bool {
+        self.in_memory_files.contains_key(path)
+    }
+
     pub fn has_in_memory_typeshed_files(&self, case_sensitive: bool) -> bool {
         let workspaces = self.workspaces.load();
         self.in_memory_files.iter().any(|(path, kind)| {

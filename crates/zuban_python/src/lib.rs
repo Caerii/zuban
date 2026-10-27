@@ -188,6 +188,12 @@ impl Project {
         self.db.close_in_memory_file(path)
     }
 
+    /// Closes the currently open paths and applies database-wide invalidation once.
+    /// Paths that are already closed are ignored.
+    pub fn close_in_memory_files(&mut self, paths: &[PathWithScheme]) {
+        self.db.close_in_memory_files(paths)
+    }
+
     pub fn diagnostics(&mut self) -> anyhow::Result<Diagnostics<'_>> {
         invalidate_matching_cache();
         if self.db.project.settings.mypy_path.len() > 1 {
