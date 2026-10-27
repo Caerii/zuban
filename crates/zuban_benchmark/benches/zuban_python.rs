@@ -117,6 +117,35 @@ fn bench_type_checking(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    let (mut project, paths) = prepare_independent_files(1000);
+    check_prepared_files(&mut project, paths.clone());
+    let edited_path = paths[0].clone();
+    let original = utils::dedent(
+        r#"
+        def foo(x: int) -> int:
+            return x
+    "#,
+    )
+    .into_boxed_str();
+    let updated = utils::dedent(
+        r#"
+        def foo(x: int) -> int:
+            return "wrong"
+    "#,
+    )
+    .into_boxed_str();
+    let mut use_updated = false;
+    c.bench_function("edit and check 1 of 1000 prepared files", |b| {
+        b.iter(|| {
+            use_updated = !use_updated;
+            let code = if use_updated { &updated } else { &original };
+            project.store_in_memory_file(edited_path.clone(), code.clone());
+            let mut document = project.document(&edited_path).unwrap();
+            let diagnostics = document.diagnostics();
+            assert_eq!(diagnostics.len(), usize::from(use_updated));
+            std::hint::black_box(diagnostics);
+        })
+    });
 }
 
 // Register the benchmarks
