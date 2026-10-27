@@ -214,9 +214,7 @@ impl NewlineIndices {
 fn utf16_to_utf8_byte_offset(s: &str, utf16_pos: usize) -> anyhow::Result<BytePositionInfos> {
     let mut utf16_count = 0;
 
-    let mut char_indices_counter = 0;
     for (utf8_idx, c) in s.char_indices() {
-        char_indices_counter += 1;
         if utf16_count == utf16_pos {
             return Ok(BytePositionInfos {
                 byte: utf8_idx as CodeIndex,
@@ -234,7 +232,7 @@ fn utf16_to_utf8_byte_offset(s: &str, utf16_pos: usize) -> anyhow::Result<BytePo
     }
     Ok(BytePositionInfos {
         byte: s.len() as CodeIndex,
-        column_out_of_bounds: utf16_pos > char_indices_counter,
+        column_out_of_bounds: utf16_pos > utf16_count,
     })
 }
 
@@ -319,6 +317,37 @@ mod tests {
         assert_eq!(indices.lines("a\r\nb\rc\né\r\n\n"), [3, 5, 7, 11, 12]);
         let indices = NewlineIndices::new();
         assert_eq!(indices.lines("\r\r\n\n"), [1, 3, 4]);
+    }
+
+    #[test]
+    fn test_utf16_position_after_non_bmp_character() {
+        let code = "😀";
+        let indices = NewlineIndices::new();
+        assert_eq!(
+            indices
+                .line_column_to_safe_byte(
+                    code,
+                    InputPosition::Utf16CodeUnits { line: 0, column: 2 }
+                )
+                .unwrap(),
+            code.len() as CodeIndex
+        );
+        assert!(
+            indices
+                .line_column_to_safe_byte(
+                    code,
+                    InputPosition::Utf16CodeUnits { line: 0, column: 1 }
+                )
+                .is_err()
+        );
+        assert!(
+            indices
+                .line_column_to_safe_byte(
+                    code,
+                    InputPosition::Utf16CodeUnits { line: 0, column: 3 }
+                )
+                .is_err()
+        );
     }
 
     #[test]
