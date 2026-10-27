@@ -102,7 +102,8 @@ pub(crate) enum DunderAllState {
 
 pub(crate) struct PythonFile {
     pub tree: Tree, // TODO should probably not be public
-    pub symbol_table: SymbolTable,
+    // Finished during binding; clones can share the names and their backing source text.
+    pub symbol_table: Arc<SymbolTable>,
     maybe_dunder_all: OnceLock<Option<DunderAllState>>, // For __all__
     pub points: Points,
     pub complex_points: ComplexValues,
@@ -380,7 +381,7 @@ impl<'db> PythonFile {
         Self {
             tree,
             file_index,
-            symbol_table,
+            symbol_table: Arc::new(symbol_table),
             maybe_dunder_all: OnceLock::default(),
             points,
             complex_points,
