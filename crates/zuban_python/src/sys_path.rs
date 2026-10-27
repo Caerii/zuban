@@ -32,17 +32,32 @@ fn create_sys_path_with_file_access(
     let new_unchecked = |p: &str| handler.unchecked_normalized_path(handler.unchecked_abs_path(p));
 
     let mut version = settings.python_version;
+    let mut venv_home = None;
     let check_global_site_packages = if let Some(env) = &settings.environment {
         let infos = pyvenv_cfg_infos(file_access, env);
         if version.is_none() {
             version = infos.version
         }
+        venv_home = infos.home;
         infos.include_system_site_packages
     } else {
         settings.add_global_packages_default
     };
 
-    let lib_path = lib_path(file_access, version);
+    let lib_path = venv_home
+        .as_deref()
+        .and_then(|home| {
+            if !cfg!(windows) || !home.is_absolute() {
+                return None;
+            }
+            let lib = home.join("Lib");
+            file_access
+                .exists(&lib.join("os.py"))
+                .ok()
+                .filter(|exists| *exists)
+                .and_then(|_| lib.to_str().map(str::to_owned))
+        })
+        .or_else(|| lib_path(file_access, version));
     if let Some(path) = &lib_path {
         tracing::info!("Decided to use {path} as the Python lib folder");
         if cfg!(target_os = "linux") {
@@ -324,6 +339,7 @@ fn lib_path(
 struct PyvenvInfos {
     include_system_site_packages: bool,
     version: Option<PythonVersion>,
+    home: Option<PathBuf>,
 }
 
 fn pyvenv_cfg_infos(file_access: impl TestableFileAccess, env: &NormalizedPath) -> PyvenvInfos {
@@ -343,6 +359,7 @@ fn pyvenv_cfg_infos(file_access: impl TestableFileAccess, env: &NormalizedPath) 
                         "version" => {
                             infos.version = value.trim().parse().ok();
                         }
+                        "home" => infos.home = Some(PathBuf::from(value.trim())),
                         _ => (),
                     }
                 }
@@ -928,6 +945,49 @@ mod tests {
                 r"C:\Program Files\Python312\Lib",
                 r"C:\Users\myuser\proj\venv\Lib\site-packages",
                 r"C:\Program Files\Python312\Lib\site-packages",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_venv_home_selects_its_own_standard_library() {
+        assert_eq!(
+            sys_path(
+                Some(r"C:\Users\myuser\proj\venv"),
+                &[],
+                &[
+                    (
+                        r"C:\Users\myuser\proj\venv\pyvenv.cfg",
+                        "home = C:\\Python311\ninclude-system-site-packages = false",
+                    ),
+                    (r"C:\Python311\Lib\os.py", ""),
+                ],
+                false,
+            ),
+            [
+                r"C:\Python311\Lib",
+                r"C:\Users\myuser\proj\venv\Lib\site-packages",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_venv_home_without_standard_library_uses_path_fallback() {
+        assert_eq!(
+            sys_path(
+                Some(r"C:\Users\myuser\proj\venv"),
+                &[r"C:\Program Files\Python312\Lib\site-packages"],
+                &[(
+                    r"C:\Users\myuser\proj\venv\pyvenv.cfg",
+                    "home = C:\\Missing\ninclude-system-site-packages = false",
+                )],
+                false,
+            ),
+            [
+                r"C:\Program Files\Python312\Lib",
+                r"C:\Users\myuser\proj\venv\Lib\site-packages",
             ]
         );
     }

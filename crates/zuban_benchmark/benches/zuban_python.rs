@@ -350,6 +350,14 @@ fn bench_type_checking(c: &mut Criterion) {
             std::hint::black_box(Project::without_watcher(options, RunCause::TypeChecking))
         })
     });
+    c.bench_function("project setup without global packages", |b| {
+        b.iter(|| {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            std::hint::black_box(Project::without_watcher(options, RunCause::TypeChecking))
+        })
+    });
     let (mut base_project, reuse_options) = prepare_reusable_project();
     c.bench_function("project reuse for tests", |b| {
         b.iter(|| {
