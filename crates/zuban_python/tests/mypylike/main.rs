@@ -2,7 +2,7 @@ mod ide;
 
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, hash_map::Entry},
+    collections::BinaryHeap,
     env,
     fs::{read_dir, read_to_string},
     path::{Path, PathBuf},
@@ -204,6 +204,12 @@ struct TestCase<'name, 'code> {
     from_mypy_test_suite: bool,
 }
 
+#[derive(Clone, Copy)]
+struct CommonProject {
+    index: usize,
+    diagnostics: DiagnosticConfig,
+}
+
 impl TestCase<'_, '_> {
     fn initialize_flags<'p>(
         &self,
@@ -212,7 +218,19 @@ impl TestCase<'_, '_> {
         mode: ModeChoice,
         mut flags: PerTestFlags,
         steps: &[Step],
+        common_slot: Option<usize>,
     ) -> (OwnedOrMut<'p, Project>, DiagnosticConfig) {
+        if let Some(slot) = common_slot
+            && let Some(entry) = projects
+                .common_projects
+                .get(self.file_name)
+                .and_then(|slots| slots[slot])
+        {
+            return (
+                OwnedOrMut::Mut(&mut projects.projects[entry.index]),
+                entry.diagnostics,
+            );
+        }
         let mut diagnostic_config = DiagnosticConfig {
             show_error_codes: false,
             ..Default::default()
@@ -354,13 +372,28 @@ impl TestCase<'_, '_> {
             project_options.flags = config;
             OwnedOrMut::Owned(projects.try_to_reuse_project_parts(project_options))
         } else {
-            OwnedOrMut::Mut(projects.get_mut(settings, config))
+            let index = projects.get_or_create_index(settings, config);
+            if let Some(slot) = common_slot {
+                projects
+                    .common_projects
+                    .entry(self.file_name.to_owned())
+                    .or_insert([None; 4])[slot] = Some(CommonProject {
+                    index,
+                    diagnostics: diagnostic_config,
+                });
+            }
+            OwnedOrMut::Mut(&mut projects.projects[index])
         };
         (project, diagnostic_config)
     }
 
     fn run(&self, projects: &mut ProjectsCache, mode: Mode) -> anyhow::Result<bool> {
         let steps = calculate_steps(Some(self.file_name), self.code);
+        let common_slot = (steps.flags.is_empty()
+            && !steps.steps[0].files.contains_key("mypy.ini")
+            && !steps.steps[0].files.contains_key("pyproject.toml")
+            && !self.code.starts_with("# pkgs:"))
+        .then_some((mode == Mode::Mypy) as usize * 2 + self.name.ends_with("_no_empty") as usize);
         // Avoid parsing, because it's pretty slow and let's not do it if not strictly necessary.
         let flags = if steps.flags.is_empty() {
             PerTestFlags::default()
@@ -405,6 +438,7 @@ impl TestCase<'_, '_> {
             },
             flags,
             &steps,
+            common_slot,
         );
 
         let is_parse_test = self.file_name.starts_with("parse");
@@ -943,7 +977,9 @@ struct ProjectsCache {
     command: Command,
     base_project: Option<Project>,
     base_version: PythonVersion,
-    map: FastHashMap<(Settings, TypeCheckerFlags), Project>,
+    map: FastHashMap<(Settings, TypeCheckerFlags), usize>,
+    projects: Vec<Project>,
+    common_projects: FastHashMap<String, [Option<CommonProject>; 4]>,
     run_cause: RunCause,
     flags_cache: FastHashMap<Vec<String>, PerTestFlags>,
 }
@@ -974,33 +1010,28 @@ impl ProjectsCache {
             run_cause,
             flags_cache: FastHashMap::default(),
             map: Default::default(),
+            projects: Vec::new(),
+            common_projects: FastHashMap::default(),
         }
     }
 
-    fn get_mut(&mut self, mut settings: Settings, flags: TypeCheckerFlags) -> &mut Project {
+    fn get_or_create_index(&mut self, mut settings: Settings, flags: TypeCheckerFlags) -> usize {
         settings.typeshed_path = Some(test_utils::typeshed_path());
         let key = (settings, flags);
-        let base_project = &mut self.base_project;
-        let base_version = self.base_version;
-        let run_cause = self.run_cause;
-        match self.map.entry(key) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let (settings, flags) = entry.key();
-                let mut options = ProjectOptions::new(settings.clone(), flags.clone());
-                set_mypy_path(&mut options);
-                let project = if settings.python_version_or_default() == base_version {
-                    if let Some(base_project) = base_project.as_mut() {
-                        base_project.try_to_reuse_project_resources_for_tests(options)
-                    } else {
-                        Project::without_watcher(options, run_cause)
-                    }
-                } else {
-                    Project::without_watcher(options, run_cause)
-                };
-                entry.insert(project)
-            }
+        if let Some(&index) = self.map.get(&key) {
+            return index;
         }
+        let mut options = ProjectOptions::new(key.0.clone(), key.1.clone());
+        set_mypy_path(&mut options);
+        let project = if key.0.python_version_or_default() == self.base_version {
+            self.try_to_reuse_project_parts(options)
+        } else {
+            Project::without_watcher(options, self.run_cause)
+        };
+        let index = self.projects.len();
+        self.projects.push(project);
+        self.map.insert(key, index);
+        index
     }
 
     fn try_to_reuse_project_parts(&mut self, mut options: ProjectOptions) -> Project {
