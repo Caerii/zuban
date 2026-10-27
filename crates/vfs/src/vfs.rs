@@ -417,6 +417,18 @@ impl<F: VfsFile> Vfs<F> {
         }
     }
 
+    pub fn has_in_memory_typeshed_files(&self, case_sensitive: bool) -> bool {
+        let workspaces = self.workspaces.load();
+        self.in_memory_files.iter().any(|(path, kind)| {
+            matches!(kind, InMemoryKind::File(_))
+                && path.scheme == file_scheme()
+                && workspaces.iter().any(|workspace| {
+                    matches!(workspace.kind, WorkspaceKind::Typeshed)
+                        && workspace.contains_file_path(&*self.handler, case_sensitive, &path.path)
+                })
+        })
+    }
+
     pub fn store_in_memory_file(
         &mut self,
         case_sensitive: bool,

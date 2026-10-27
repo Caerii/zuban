@@ -552,6 +552,12 @@ impl TypeshedSymbols {
     }
 
     fn cached(db: &Database) -> Arc<Self> {
+        if db.typeshed_has_overlay {
+            return db
+                .typeshed_overlay_index
+                .get_or_init(|| Arc::new(Self::generate_typeshed_symbols(db)))
+                .clone();
+        }
         const TYPESHED_CACHE_VERSION: usize = 2;
         let typeshed_path = db
             .project
@@ -621,18 +627,22 @@ impl TypeshedSymbols {
         .clone()
     }
 
-    pub(crate) fn invalidate_path(db: &Database, path: &AbsPath) {
-        let workspaces = db.vfs.workspaces.load();
-        if !workspaces.iter().any(|workspace| {
+    pub(crate) fn contains_path(db: &Database, path: &AbsPath) -> bool {
+        db.vfs.workspaces.load().iter().any(|workspace| {
             matches!(workspace.kind, WorkspaceKind::Typeshed)
                 && workspace.contains_file_path(
                     &*db.vfs.handler,
                     db.project.flags.case_sensitive,
                     path,
                 )
-        }) {
-            return;
+        })
+    }
+
+    pub(crate) fn invalidate_path(db: &Database, path: &AbsPath) -> bool {
+        if !Self::contains_path(db, path) {
+            return false;
         }
+        let workspaces = db.vfs.workspaces.load();
         let typeshed_path = db
             .project
             .settings
@@ -657,6 +667,7 @@ impl TypeshedSymbols {
                 tracing::warn!("Could not remove stale typeshed index: {err:?}");
             }
         }
+        true
     }
 
     fn generate_typeshed_symbols(db: &Database) -> Self {
@@ -847,7 +858,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
-    use vfs::LocalFS;
+    use vfs::{LocalFS, PathWithScheme};
 
     #[test]
     fn typeshed_index_is_scoped_to_its_root() {
@@ -896,12 +907,63 @@ mod tests {
             &TypeshedSymbols::cached(&first_project.db)
         ));
 
+        let stub_path = PathBuf::from(other.path()).join("stdlib/zuban_cache_other_root.pyi");
+        let overlay_path = PathWithScheme::with_file_scheme(
+            second_project
+                .vfs_handler()
+                .normalize_unchecked_abs_path(stub_path.to_str().unwrap()),
+        );
+        second_project.store_in_memory_file(
+            overlay_path.clone(),
+            "class OnlyInMemoryTypeshedRoot: ...\n".into(),
+        );
+        let overlay = TypeshedSymbols::cached(&second_project.db);
+        assert_eq!(overlay.lookup("OnlyInMemoryTypeshedRoot").count(), 1);
+        assert!(overlay.lookup("OnlyInOtherTypeshedRoot").next().is_none());
+        assert!(!Arc::ptr_eq(&second, &overlay));
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(other_root.clone());
+        let peer_project = Project::without_watcher(options, RunCause::LanguageServer);
+        assert!(Arc::ptr_eq(
+            &second,
+            &TypeshedSymbols::cached(&peer_project.db)
+        ));
+        second_project.store_in_memory_file(
+            overlay_path.clone(),
+            "class UpdatedInMemoryTypeshedRoot: ...\n".into(),
+        );
+        let updated_overlay = TypeshedSymbols::cached(&second_project.db);
+        assert!(
+            updated_overlay
+                .lookup("OnlyInMemoryTypeshedRoot")
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            updated_overlay
+                .lookup("UpdatedInMemoryTypeshedRoot")
+                .count(),
+            1
+        );
+        second_project.close_in_memory_file(&overlay_path).unwrap();
+        let disk_after_close = TypeshedSymbols::cached(&second_project.db);
+        assert_eq!(
+            disk_after_close.lookup("OnlyInOtherTypeshedRoot").count(),
+            1
+        );
+        assert!(
+            disk_after_close
+                .lookup("OnlyInMemoryTypeshedRoot")
+                .next()
+                .is_none()
+        );
+
         let unrelated_path = second_project
             .vfs_handler()
             .unchecked_abs_path(&format!("{}/unrelated.py", other.path()));
         second_project.invalidate_path(&unrelated_path);
         assert!(Arc::ptr_eq(
-            &second,
+            &disk_after_close,
             &TypeshedSymbols::cached(&second_project.db)
         ));
 

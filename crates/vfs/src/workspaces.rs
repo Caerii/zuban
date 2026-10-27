@@ -577,12 +577,16 @@ impl Workspace {
         case_sensitive: bool,
         path: &AbsPath,
     ) -> bool {
-        if strip_path_prefix(vfs, case_sensitive, path, self.root_path()).is_some() {
+        if match_case(case_sensitive, path, self.root_path())
+            || strip_path_prefix(vfs, case_sensitive, path, self.root_path()).is_some()
+        {
             return true;
         }
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))]
         {
-            if strip_path_prefix(vfs, case_sensitive, path, &self.canonicalized_path).is_some() {
+            if match_case(case_sensitive, path, &self.canonicalized_path)
+                || strip_path_prefix(vfs, case_sensitive, path, &self.canonicalized_path).is_some()
+            {
                 return true;
             }
         }

@@ -1071,6 +1071,8 @@ pub(crate) struct Database {
     pub project: PythonProject,
     pub run_cause: RunCause,
     pub pytest_folder: RwLock<Option<Weak<Directory>>>,
+    pub typeshed_overlay_index: OnceLock<Arc<TypeshedSymbols>>,
+    pub typeshed_has_overlay: bool,
 }
 
 fn cached_core_stub_tree(code: Box<str>) -> Tree {
@@ -1179,12 +1181,15 @@ impl Database {
             );
         }
 
+        let typeshed_has_overlay = vfs.has_in_memory_typeshed_files(project.flags.case_sensitive);
         let mut this = Self {
             vfs,
             python_state: PythonState::reserve(),
             project,
             run_cause,
             pytest_folder: Default::default(),
+            typeshed_overlay_index: Default::default(),
+            typeshed_has_overlay,
         };
 
         this.generate_python_state();
@@ -1228,12 +1233,15 @@ impl Database {
         let vfs = self
             .vfs
             .with_reused_test_resources(Box::new(LocalFS::without_watcher()), mypy_path_iter);
+        let typeshed_has_overlay = vfs.has_in_memory_typeshed_files(project.flags.case_sensitive);
         let mut new_db = Self {
             vfs,
             python_state: self.python_state.clone(),
             run_cause: self.run_cause,
             project,
             pytest_folder: Default::default(),
+            typeshed_overlay_index: Default::default(),
+            typeshed_has_overlay,
         };
 
         for (kind, p1) in &new_db.project.sys_path {
@@ -1399,6 +1407,10 @@ impl Database {
         code: Box<str>,
         parent: Option<FileIndex>,
     ) {
+        let is_typeshed = TypeshedSymbols::contains_path(self, path.path());
+        if is_typeshed {
+            self.typeshed_overlay_index.take();
+        }
         if let Some(parent) = parent
             && let Some(in_mem_file) = self.vfs.in_memory_file(&path)
             && let Some(file) = self.vfs.file_mut(in_mem_file)
@@ -1432,6 +1444,9 @@ impl Database {
                 file
             },
         );
+        if is_typeshed && file_index.is_some() {
+            self.typeshed_has_overlay = true;
+        }
         if let Some(parent) = parent {
             debug_assert!(
                 file_index.is_some(),
@@ -1486,6 +1501,12 @@ impl Database {
                 )
             },
         )?;
+        if TypeshedSymbols::invalidate_path(self, dir_path.path()) {
+            self.typeshed_overlay_index.take();
+            self.typeshed_has_overlay = self
+                .vfs
+                .has_in_memory_typeshed_files(self.project.flags.case_sensitive);
+        }
         self.handle_invalidation(invalidation);
         Ok(())
     }
@@ -1517,12 +1538,20 @@ impl Database {
                 )
             },
         )?;
+        if TypeshedSymbols::invalidate_path(self, path.path()) {
+            self.typeshed_overlay_index.take();
+            self.typeshed_has_overlay = self
+                .vfs
+                .has_in_memory_typeshed_files(self.project.flags.case_sensitive);
+        }
         self.handle_invalidation(result);
         Ok(())
     }
 
     pub fn invalidate_path(&mut self, path: &AbsPath) {
-        TypeshedSymbols::invalidate_path(self, path);
+        if TypeshedSymbols::invalidate_path(self, path) {
+            self.typeshed_overlay_index.take();
+        }
         let invalidation = self
             .vfs
             .invalidate_path(self.project.flags.case_sensitive, path);
