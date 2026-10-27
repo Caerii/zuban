@@ -1,5 +1,7 @@
 use std::{
-    path::Path,
+    collections::hash_map::{DefaultHasher, Entry},
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -14,7 +16,10 @@ use parsa_python_cst::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use utils::FastHashMap;
-use vfs::{Directory, DirectoryEntry, Entries, FileEntry, Parent, PathWithScheme, WorkspaceKind};
+use vfs::{
+    Directory, DirectoryEntry, Entries, FileEntry, NormalizedPath, Parent, PathWithScheme,
+    WorkspaceKind,
+};
 
 use crate::{
     CodeAction, Project, RunCause,
@@ -498,10 +503,37 @@ struct VersionedTypeshedSymbols {
 }
 
 impl TypeshedSymbols {
-    fn cached(db: &Database) -> &'static Self {
-        static CELL: OnceLock<TypeshedSymbols> = OnceLock::new();
+    fn cache_file(cache_dir: &Path, typeshed_path: &NormalizedPath) -> PathBuf {
+        let mut hasher = DefaultHasher::new();
+        typeshed_path.hash(&mut hasher);
+        cache_dir.join(format!("typeshed-{:016x}.cache", hasher.finish()))
+    }
+
+    fn cached(db: &Database) -> Arc<Self> {
+        static CELLS: OnceLock<
+            Mutex<FastHashMap<Arc<NormalizedPath>, Arc<OnceLock<Arc<TypeshedSymbols>>>>>,
+        > = OnceLock::new();
         const TYPESHED_CACHE_VERSION: usize = 1;
-        CELL.get_or_init(|| {
+        let typeshed_path = db
+            .project
+            .settings
+            .typeshed_path
+            .clone()
+            .unwrap_or_else(|| {
+                db.vfs
+                    .workspaces
+                    .load()
+                    .iter()
+                    .find(|workspace| matches!(workspace.kind, WorkspaceKind::Typeshed))
+                    .expect("There should always be a typeshed workspace kind")
+                    .root_path
+                    .clone()
+            });
+        let cell = {
+            let mut cells = CELLS.get_or_init(Default::default).lock().unwrap();
+            cells.entry(typeshed_path.clone()).or_default().clone()
+        };
+        cell.get_or_init(|| {
             let cache = || {
                 let mut options = ProjectOptions::default();
                 options.settings.typeshed_path = db.project.settings.typeshed_path.clone();
@@ -513,26 +545,12 @@ impl TypeshedSymbols {
             if let Some(cache_dir) = cache_dir
                 && std::fs::create_dir_all(&cache_dir).is_ok()
             {
-                const CACHE_FILE_NAME: &'static str = "typeshed.cache";
-                let file = cache_dir.join(CACHE_FILE_NAME);
-                let typeshed_path =
-                    db.project
-                        .settings
-                        .typeshed_path
-                        .clone()
-                        .unwrap_or_else(|| {
-                            for workspace in db.vfs.workspaces.load().iter() {
-                                if matches!(&workspace.kind, WorkspaceKind::Typeshed) {
-                                    return workspace.root_path.clone();
-                                }
-                            }
-                            unreachable!("There should always be a typeshed workspace kind")
-                        });
+                let file = Self::cache_file(&cache_dir, &typeshed_path);
                 if let Some(cached) = load_cache::<VersionedTypeshedSymbols>(&file)
                     && cached.version == TYPESHED_CACHE_VERSION
                     && *cached.typeshed_path.as_str() == ***typeshed_path
                 {
-                    return cached.symbols;
+                    return Arc::new(cached.symbols);
                 }
                 let result = VersionedTypeshedSymbols {
                     version: TYPESHED_CACHE_VERSION,
@@ -547,10 +565,11 @@ impl TypeshedSymbols {
                     }
                     Err(err) => tracing::error!("Could not serialize typeshed.cache: {err:?}"),
                 };
-                return result.symbols;
+                return Arc::new(result.symbols);
             }
-            cache()
+            Arc::new(cache())
         })
+        .clone()
     }
 
     fn generate_typeshed_symbols(db: &Database) -> Self {
@@ -569,13 +588,13 @@ impl TypeshedSymbols {
                         found.files.push(TypeshedFile {
                             path: (**file.file_path(db)).to_string(),
                         });
-                        let insert_symbol = |found: &mut Self, name: &str| {
-                            if let Some(files) = found.symbols_to_files.get_mut(name) {
-                                files.insert_last(index);
-                            } else {
-                                found
-                                    .symbols_to_files
-                                    .insert(name.to_string(), SingleLinkedList::new(index));
+                        let insert_symbol = |found: &mut Self, name: &str| match found
+                            .symbols_to_files
+                            .entry(name.to_string())
+                        {
+                            Entry::Occupied(mut occupied) => occupied.get_mut().insert_last(index),
+                            Entry::Vacant(vacant) => {
+                                vacant.insert_entry(SingleLinkedList::new(index));
                             }
                         };
                         match &entry.parent {
@@ -729,9 +748,73 @@ fn might_be_python_identifier(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FILE_LOAD_LIMIT, might_be_python_identifier, reserve_file_load};
+    use super::{FILE_LOAD_LIMIT, TypeshedSymbols, might_be_python_identifier, reserve_file_load};
+    use crate::{Project, RunCause};
+    use config::ProjectOptions;
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    use vfs::LocalFS;
+
+    #[test]
+    fn typeshed_index_is_scoped_to_its_root() {
+        let source = PathBuf::from(test_utils::typeshed_path().to_string());
+        let other = test_utils::TestDir::new(false);
+        for path in [
+            "stdlib/VERSIONS",
+            "stdlib/builtins.pyi",
+            "stdlib/typing.pyi",
+            "stdlib/_typeshed/__init__.pyi",
+            "stdlib/types.pyi",
+            "stdlib/abc.pyi",
+            "stdlib/functools.pyi",
+            "stdlib/enum.pyi",
+            "stdlib/dataclasses.pyi",
+            "stdlib/typing_extensions.pyi",
+            "stdlib/collections/__init__.pyi",
+            "stdlib/_collections_abc.pyi",
+            "stdlib/warnings.pyi",
+            "stubs/mypy-extensions/mypy_extensions.pyi",
+        ] {
+            let destination = PathBuf::from(other.path()).join(path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(source.join(path), destination).unwrap();
+        }
+        other.write_file(
+            "stdlib/zuban_cache_other_root.pyi",
+            "class OnlyInOtherTypeshedRoot: ...\n",
+        );
+
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        let first_project = Project::without_watcher(options, RunCause::LanguageServer);
+        let first = TypeshedSymbols::cached(&first_project.db);
+        assert!(first.lookup("OnlyInOtherTypeshedRoot").next().is_none());
+
+        let mut options = ProjectOptions::default();
+        let other_root = LocalFS::without_watcher().normalized_path_from_current_dir(other.path());
+        options.settings.typeshed_path = Some(other_root.clone());
+        let second_project = Project::without_watcher(options, RunCause::LanguageServer);
+        let second = TypeshedSymbols::cached(&second_project.db);
+        assert_eq!(second.lookup("OnlyInOtherTypeshedRoot").count(), 1);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(
+            &first,
+            &TypeshedSymbols::cached(&first_project.db)
+        ));
+        if let Some(cache_dir) = dirs::cache_dir() {
+            let cache_file = TypeshedSymbols::cache_file(&cache_dir.join("zuban"), &other_root);
+            if cache_file.exists() {
+                fs::remove_file(cache_file).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn parallel_auto_import_scans_respect_file_load_limit() {
