@@ -705,6 +705,7 @@ fn initialize_and_return_wanted_output(
 
     let mut sorted_files: Vec<_> = step.files.iter().collect();
     sorted_files.sort();
+    let mut independent_files = Vec::new();
     for &(&path, &code) in &sorted_files {
         // ../ files are usually Mypy internals
         if ["mypy.ini", "pyproject.toml"].contains(&path) || path.starts_with("../") {
@@ -719,13 +720,15 @@ fn initialize_and_return_wanted_output(
         // testAbstractClassSubclasses
         let p = base_path_join(local_fs, path);
         if let Some(parent) = maybe_parent(local_fs, code) {
+            project.store_in_memory_files(std::mem::take(&mut independent_files));
             project
                 .store_in_memory_file_with_parent(p, code.into(), &parent)
                 .unwrap();
         } else {
-            project.store_in_memory_file(p, code.into());
+            independent_files.push((p, code.into()));
         }
     }
+    project.store_in_memory_files(independent_files);
     for line in &mut wanted {
         replace_unions(line);
         replace_optional(line);

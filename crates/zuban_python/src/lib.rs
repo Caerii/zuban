@@ -134,6 +134,12 @@ impl Project {
         self.db.store_in_memory_file(path, code, None);
     }
 
+    /// Stores independent files and applies database-wide invalidation once.
+    /// Parent-linked files must be stored separately after their parent.
+    pub fn store_in_memory_files(&mut self, files: Vec<(PathWithScheme, Box<str>)>) {
+        self.db.store_in_memory_files(files);
+    }
+
     pub fn store_file_with_lsp_changes(
         &mut self,
         path: PathWithScheme,

@@ -331,8 +331,12 @@ impl Workspaces {
             workspaces: &Workspaces,
             dir: Directory,
         ) -> Arc<Directory> {
-            // TODO not all entries need to be recalculated if it's not yet calculated
             let dir = Arc::new(dir);
+            // Preserve lazy directories. Reading them here recursively scans paths that the
+            // cloned workspace may never need, and the new parent already points at `dir`.
+            if dir.entries.get().is_none() {
+                return dir;
+            }
             for (_, entry) in Directory::entries_with_workspaces(vfs, workspaces, &dir)
                 .borrow_mut()
                 .iter_mut()

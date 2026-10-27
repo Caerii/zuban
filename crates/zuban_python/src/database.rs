@@ -1407,6 +1407,24 @@ impl Database {
         code: Box<str>,
         parent: Option<FileIndex>,
     ) {
+        let invalidation = self.store_in_memory_file_without_db_invalidation(path, code, parent);
+        self.handle_invalidation(invalidation);
+    }
+
+    pub fn store_in_memory_files(&mut self, files: Vec<(PathWithScheme, Box<str>)>) {
+        let mut invalidation = InvalidationResult::InvalidatedFiles;
+        for (path, code) in files {
+            invalidation |= self.store_in_memory_file_without_db_invalidation(path, code, None);
+        }
+        self.handle_invalidation(invalidation);
+    }
+
+    fn store_in_memory_file_without_db_invalidation(
+        &mut self,
+        path: PathWithScheme,
+        code: Box<str>,
+        parent: Option<FileIndex>,
+    ) -> InvalidationResult {
         let is_typeshed = TypeshedSymbols::contains_path(self, path.path());
         if is_typeshed {
             self.typeshed_overlay_index.take();
@@ -1461,7 +1479,7 @@ impl Database {
                     .add_separate_file(file_index)
             }
         }
-        self.handle_invalidation(invalidation);
+        invalidation
     }
 
     fn handle_invalidation(&mut self, invalidation_result: InvalidationResult) {
