@@ -7,7 +7,7 @@ use std::{
     fs::{read_dir, read_to_string},
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -80,6 +80,25 @@ thread_local! {
         let local_fs = SimpleLocalFS::without_watcher();
         local_fs.normalize_rc_path(local_fs.unchecked_abs_path(BASE_PATH_STR))
     };
+}
+static CURRENT_TEST: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+struct CurrentTestGuard(Option<(String, String)>);
+
+impl CurrentTestGuard {
+    fn new(name: &str, file_name: &str) -> Self {
+        let context = Some((name.to_owned(), file_name.to_owned()));
+        Self(std::mem::replace(
+            &mut *CURRENT_TEST.lock().unwrap(),
+            context,
+        ))
+    }
+}
+
+impl Drop for CurrentTestGuard {
+    fn drop(&mut self) {
+        *CURRENT_TEST.lock().unwrap() = self.0.take();
+    }
 }
 
 const MYPY_TEST_DATA_PACKAGES_FOLDER: &str = "tests/mypylike/mypy/test-data/packages/";
@@ -469,6 +488,7 @@ impl TestCase<'_, '_> {
         {
             return Ok(false);
         }
+        let _current_test = CurrentTestGuard::new(&self.name, self.file_name);
         let local_fs = SimpleLocalFS::without_watcher();
         let no_typecheck = flags.no_typecheck;
         // Flag-bearing cases with the same effective fixture settings can share the resolved
@@ -556,14 +576,6 @@ impl TestCase<'_, '_> {
                             .unwrap()
                     });
             }
-            let default_panic = std::panic::take_hook();
-            let cloned_name = self.name.clone();
-            let cloned_file_name = self.file_name.to_string();
-            std::panic::set_hook(Box::new(move |info| {
-                println!("Panic in {cloned_name} ({cloned_file_name})");
-                default_panic(info);
-            }));
-
             let mut diagnostics: Vec<_> = if no_typecheck {
                 vec![]
             } else {
@@ -604,8 +616,6 @@ impl TestCase<'_, '_> {
                 // Remove notes that only exist in Zuban
                 diagnostics.retain(|x| !x.contains("note: TypedDicts can only be assigned to"))
             }
-
-            let _ = std::panic::take_hook();
 
             let mut actual = replace_annoyances(diagnostics.join("\n"));
             if is_parse_test && self.file_name == "parse-errors" {
@@ -1134,6 +1144,15 @@ impl<'a, T> OwnedOrMut<'a, T> {
 
 fn main() -> ExitCode {
     logging_config::setup_logging(None).unwrap();
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Ok(current) = CURRENT_TEST.try_lock()
+            && let Some((name, file_name)) = current.as_ref()
+        {
+            println!("Panic in {name} ({file_name})");
+        }
+        default_panic(info);
+    }));
 
     // Avoid the --, because that's the only way how we can accept flags like --foo like
     // cargo test mypy -- -- --foo. Otherwise libtest? complains, if we just use -- once.
