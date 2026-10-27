@@ -215,7 +215,7 @@ impl<'db> ImportFinder<'db> {
     }
 
     fn has_reached_limits(&self) -> bool {
-        self.files_loaded.load(Ordering::Relaxed) > FILE_LOAD_LIMIT
+        self.files_loaded.load(Ordering::Relaxed) >= FILE_LOAD_LIMIT
     }
 
     fn find_importable_name_in_file_entry(
@@ -223,10 +223,9 @@ impl<'db> ImportFinder<'db> {
         entry: &Arc<FileEntry>,
         add_star_imports: bool,
     ) -> bool {
-        if self.has_reached_limits() {
+        if !reserve_file_load(&self.files_loaded) {
             return false;
         }
-        self.files_loaded.fetch_add(1, Ordering::SeqCst);
         let Some(file) = self.db.load_file_from_workspace(entry) else {
             return false;
         };
@@ -277,6 +276,10 @@ impl<'db> ImportFinder<'db> {
         }
         false
     }
+}
+
+fn reserve_file_load(files_loaded: &AtomicUsize) -> bool {
+    files_loaded.fetch_add(1, Ordering::Relaxed) < FILE_LOAD_LIMIT
 }
 
 fn all_recursive_public_typeshed_file_entries(
@@ -727,7 +730,20 @@ fn might_be_python_identifier(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::might_be_python_identifier;
+    use super::{FILE_LOAD_LIMIT, might_be_python_identifier, reserve_file_load};
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn parallel_auto_import_scans_respect_file_load_limit() {
+        let attempts = AtomicUsize::new(0);
+        let reserved = (0..FILE_LOAD_LIMIT * 2)
+            .into_par_iter()
+            .filter(|_| reserve_file_load(&attempts))
+            .count();
+        assert_eq!(reserved, FILE_LOAD_LIMIT);
+        assert!(attempts.load(Ordering::Relaxed) >= FILE_LOAD_LIMIT);
+    }
 
     #[test]
     fn identifiers() {
