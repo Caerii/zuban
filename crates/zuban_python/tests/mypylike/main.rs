@@ -2,7 +2,7 @@ mod ide;
 
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, HashMap},
+    collections::{BinaryHeap, HashMap, hash_map::Entry},
     env,
     fs::{read_dir, read_to_string},
     path::{Path, PathBuf},
@@ -972,18 +972,27 @@ impl ProjectsCache {
     fn get_mut(&mut self, mut settings: Settings, flags: TypeCheckerFlags) -> &mut Project {
         settings.typeshed_path = Some(test_utils::typeshed_path());
         let key = (settings, flags);
-        if !self.map.contains_key(&key) {
-            let mut options = ProjectOptions::new(key.0.clone(), key.1.clone());
-            set_mypy_path(&mut options);
-            // We can only reuse the project if the python version matches.
-            let project = if key.0.python_version_or_default() == self.base_version {
-                self.try_to_reuse_project_parts(options)
-            } else {
-                Project::without_watcher(options, self.run_cause)
-            };
-            self.map.insert(key.clone(), project);
+        let base_project = &mut self.base_project;
+        let base_version = self.base_version;
+        let run_cause = self.run_cause;
+        match self.map.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let (settings, flags) = entry.key();
+                let mut options = ProjectOptions::new(settings.clone(), flags.clone());
+                set_mypy_path(&mut options);
+                let project = if settings.python_version_or_default() == base_version {
+                    if let Some(base_project) = base_project.as_mut() {
+                        base_project.try_to_reuse_project_resources_for_tests(options)
+                    } else {
+                        Project::without_watcher(options, run_cause)
+                    }
+                } else {
+                    Project::without_watcher(options, run_cause)
+                };
+                entry.insert(project)
+            }
         }
-        self.map.get_mut(&key).unwrap()
     }
 
     fn try_to_reuse_project_parts(&mut self, mut options: ProjectOptions) -> Project {
@@ -1049,7 +1058,7 @@ fn run(
     cli_args: &CliArgs,
     run_cause: RunCause,
     files: &[(bool, PathBuf)],
-    skipped: &[Skipped],
+    skipped: &SkippedIndex,
     filters: &[&str],
 ) -> usize {
     let start = Instant::now();
@@ -1080,10 +1089,7 @@ fn run(
                     continue;
                 }
             }
-            if skipped
-                .iter()
-                .any(|s| s.is_skip(case.file_name, &case.name) && !filters.contains(&&*case.name))
-            {
+            if skipped.is_skip(case.file_name, &case.name) && !filters.contains(&&*case.name) {
                 //println!("Skipped: {}", case.name);
                 full_count += 1;
                 continue;
@@ -1228,6 +1234,26 @@ struct Skipped {
     end_star: bool,
 }
 
+struct SkippedIndex {
+    exact: FastHashSet<String>,
+    exact_for_file: HashMap<String, FastHashSet<String>>,
+    patterns: Vec<Skipped>,
+}
+
+impl SkippedIndex {
+    fn is_skip(&self, file_name: &str, name: &str) -> bool {
+        self.exact.contains(name)
+            || self
+                .exact_for_file
+                .get(file_name)
+                .is_some_and(|names| names.contains(name))
+            || self
+                .patterns
+                .iter()
+                .any(|skip| skip.is_skip(file_name, name))
+    }
+}
+
 impl Skipped {
     fn is_skip(&self, file_name: &str, name: &str) -> bool {
         if let Some(only_for_file) = self.only_for_file.as_ref()
@@ -1247,12 +1273,18 @@ impl Skipped {
     }
 }
 
-fn skipped() -> Box<[Skipped]> {
+fn skipped() -> SkippedIndex {
     let mut skipped_path = get_base();
     skipped_path.push("skipped");
     let file = read_to_string(skipped_path).unwrap();
 
-    file.trim()
+    let mut index = SkippedIndex {
+        exact: FastHashSet::default(),
+        exact_for_file: HashMap::new(),
+        patterns: Vec::new(),
+    };
+    for skip in file
+        .trim()
         .split('\n')
         .filter(|line| !line.starts_with('#'))
         .map(|mut x| {
@@ -1283,7 +1315,20 @@ fn skipped() -> Box<[Skipped]> {
                 end_star,
             }
         })
-        .collect()
+    {
+        if skip.start_star || skip.end_star {
+            index.patterns.push(skip);
+        } else if let Some(file_name) = skip.only_for_file {
+            index
+                .exact_for_file
+                .entry(file_name)
+                .or_default()
+                .insert(skip.name);
+        } else {
+            index.exact.insert(skip.name);
+        }
+    }
+    index
 }
 
 struct Timings {
