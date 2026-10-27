@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     cell::Cell,
+    collections::HashMap,
     fmt, mem,
     ops::Range,
     sync::{Arc, Mutex, OnceLock, RwLock, Weak},
@@ -1071,6 +1072,26 @@ pub(crate) struct Database {
     pub pytest_folder: RwLock<Option<Weak<Directory>>>,
 }
 
+fn cached_core_stub_tree(code: Box<str>) -> Tree {
+    // Core stubs are parsed for every project. Their syntax trees depend only on exact source
+    // text, while PythonFile::new builds fresh project-specific indexes from the cloned tree.
+    if code.len() > 1024 * 1024 {
+        return Tree::parse(code);
+    }
+    static TREES: OnceLock<Mutex<HashMap<Box<str>, Tree>>> = OnceLock::new();
+    let trees = TREES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(tree) = trees.lock().unwrap().get(code.as_ref()).cloned() {
+        return tree;
+    }
+    let tree = Tree::parse(code);
+    let mut trees = trees.lock().unwrap();
+    if trees.len() >= 32 {
+        trees.clear();
+    }
+    trees.insert(tree.code().into(), tree.clone());
+    tree
+}
+
 impl Database {
     pub fn new(vfs_handler: Box<dyn VfsHandler>, options: ProjectOptions, cause: RunCause) -> Self {
         Self::new_internal(vfs_handler, options, cause, None)
@@ -1339,10 +1360,24 @@ impl Database {
             invalidates_db,
             |file_index, code| {
                 tracing::trace!(
-                    "Start parsing {}",
+                    "Load Python file {}",
                     file_entry.absolute_path(&*self.vfs.handler).as_uri()
                 );
-                PythonFile::from_file_entry_and_code(&self.project, file_index, file_entry, code)
+                if invalidates_db {
+                    PythonFile::new(
+                        &self.project,
+                        file_index,
+                        file_entry,
+                        cached_core_stub_tree(code),
+                    )
+                } else {
+                    PythonFile::from_file_entry_and_code(
+                        &self.project,
+                        file_index,
+                        file_entry,
+                        code,
+                    )
+                }
             },
         )
     }

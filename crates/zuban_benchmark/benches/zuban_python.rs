@@ -4,7 +4,7 @@ use config::ProjectOptions;
 use vfs::PathWithScheme;
 use zuban_python::{Project, RunCause};
 
-fn check_independent_files(file_count: usize) {
+fn prepare_independent_files(file_count: usize) -> (Project, Vec<PathWithScheme>) {
     let some_code = utils::dedent(
         r#"
         def foo(x: int) -> int:
@@ -14,18 +14,45 @@ fn check_independent_files(file_count: usize) {
     let mut po = ProjectOptions::default();
     po.settings.typeshed_path = Some(test_utils::typeshed_path());
     let mut project = Project::without_watcher(po, RunCause::TypeChecking);
+    let mut paths = Vec::with_capacity(file_count);
     for i in 0..file_count {
         let vfs = project.vfs_handler();
         let path = PathWithScheme::with_file_scheme(
             vfs.normalize_rc_path(vfs.unchecked_abs_path(&format!("/bench-test/test{i}.py"))),
         );
-        project.store_in_memory_file(path, some_code.clone().into())
+        project.store_in_memory_file(path.clone(), some_code.clone().into());
+        paths.push(path);
+    }
+    (project, paths)
+}
+
+fn check_independent_files(file_count: usize) {
+    let (mut project, paths) = prepare_independent_files(file_count);
+    for path in paths {
+        let mut document = project
+            .document(&path)
+            .expect("stored file must be available");
+        std::hint::black_box(document.diagnostics());
     }
 }
 
 fn bench_type_checking(c: &mut Criterion) {
-    c.bench_function("1 file", |b| b.iter(|| check_independent_files(1)));
-    c.bench_function("1000 files", |b| b.iter(|| check_independent_files(1000)));
+    c.bench_function("project setup", |b| {
+        b.iter(|| {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            std::hint::black_box(Project::without_watcher(options, RunCause::TypeChecking))
+        })
+    });
+    c.bench_function("insert 1000 files", |b| {
+        b.iter(|| std::hint::black_box(prepare_independent_files(1000)))
+    });
+    c.bench_function("type check 1 file", |b| {
+        b.iter(|| check_independent_files(1))
+    });
+    c.bench_function("type check 1000 files", |b| {
+        b.iter(|| check_independent_files(1000))
+    });
 }
 
 // Register the benchmarks
