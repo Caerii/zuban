@@ -1,4 +1,4 @@
-use std::{cell::RefCell, cmp::Ordering};
+use std::{cell::RefCell, cmp::Ordering, sync::Arc};
 
 use config::{FinalizedTypeCheckerFlags, Settings};
 use parsa_python_cst::*;
@@ -137,7 +137,7 @@ impl<'db> NameBinder<'db> {
             binder.db_infos.complex_points.insert(
                 binder.db_infos.points,
                 class_index,
-                ComplexPoint::Class(Box::new(ClassStorage {
+                ComplexPoint::Class(Arc::new(ClassStorage {
                     class_symbol_table: unresolved_class.class_symbol_table,
                     abstract_attributes: unresolved_class.abstract_attributes,
                     self_symbol_table,

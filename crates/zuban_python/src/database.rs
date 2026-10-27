@@ -723,7 +723,7 @@ pub(crate) struct PartialFlags {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComplexPoint {
     TypeInstance(Type),
-    Class(Box<ClassStorage>),
+    Class(Arc<ClassStorage>),
     ClassInfos(Box<ClassInfos>),
     TypeVarLikes(TypeVarLikes),
     FunctionOverload(Box<OverloadDefinition>),
@@ -1921,6 +1921,7 @@ impl ParentScope {
     }
 }
 
+// Built by name binding and only read afterward, so database clones can share it.
 #[derive(Debug, Clone)]
 pub(crate) struct ClassStorage {
     pub class_symbol_table: SymbolTable,
