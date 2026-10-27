@@ -35,21 +35,25 @@ pub(crate) fn apply_document_changes(
 
     // If at least one of the changes is a full document change, use the last
     // of them as the starting point and ignore all previous changes.
-    let (mut text, content_changes) = match content_changes
+    let (mut text, content_changes, has_full_replacement) = match content_changes
         .iter()
         .rposition(|change| change.range.is_none())
     {
         Some(idx) => {
             let text = std::mem::take(&mut content_changes[idx].text);
-            (text, &content_changes[idx + 1..])
+            (text, &content_changes[idx + 1..], true)
         }
-        None => (file_contents.to_string(), &content_changes[..]),
+        None => (file_contents.to_string(), &content_changes[..], false),
     };
     if content_changes.is_empty() {
         return Ok(text);
     }
 
-    let mut line_indices = Cow::Borrowed(line_indices);
+    let mut line_indices = if has_full_replacement {
+        Cow::Owned(NewlineIndices::new())
+    } else {
+        Cow::Borrowed(line_indices)
+    };
     // The changes we got must be applied sequentially, but can cross lines so we
     // have to keep our line index updated.
     // Some clients (e.g. Code) sort the ranges in reverse. As an optimization, we
@@ -184,6 +188,33 @@ mod tests {
             )
             .unwrap(),
             "new-code"
+        );
+    }
+
+    #[test]
+    fn test_full_replacement_then_range_uses_replacement_lines() {
+        let old_code = "a\nb\n";
+        let old_lines = NewlineIndices::new();
+        old_lines
+            .line_column_to_safe_byte(old_code, InputPosition::CodePoints { line: 1, column: 0 })
+            .unwrap();
+        let full = TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: "first\nsecond\n".into(),
+        };
+        assert_eq!(
+            apply_document_changes(
+                old_code,
+                &old_lines,
+                vec![full, change(1, 0, 1, 6, "final")],
+                |pos| InputPosition::CodePoints {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                }
+            )
+            .unwrap(),
+            "first\nfinal\n"
         );
     }
 
