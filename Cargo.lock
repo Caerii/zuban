@@ -2476,6 +2476,7 @@ version = "0.10.1"
 dependencies = [
  "config",
  "criterion",
+ "lsp-types",
  "parsa_python_cst",
  "test_utils",
  "utils",

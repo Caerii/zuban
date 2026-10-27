@@ -11,6 +11,28 @@ pub(crate) fn apply_document_changes(
     mut content_changes: Vec<TextDocumentContentChangeEvent>,
     to_input_position: impl Fn(Position) -> InputPosition,
 ) -> anyhow::Result<String> {
+    // A single incremental edit can construct the new document in one pass.
+    // Copying the old text and then replacing a range moves its suffix twice.
+    if let [change] = content_changes.as_slice()
+        && let Some(range) = change.range
+    {
+        if range.start > range.end {
+            bail!("Invalid range of a change, start is bigger than end: {range:?}");
+        }
+        let start = line_indices
+            .line_column_to_safe_byte(file_contents, to_input_position(range.start))?
+            as usize;
+        let end = line_indices
+            .line_column_to_safe_byte(file_contents, to_input_position(range.end))?
+            as usize;
+        let mut text =
+            String::with_capacity(file_contents.len() - (end - start) + change.text.len());
+        text.push_str(&file_contents[..start]);
+        text.push_str(&change.text);
+        text.push_str(&file_contents[end..]);
+        return Ok(text);
+    }
+
     // If at least one of the changes is a full document change, use the last
     // of them as the starting point and ignore all previous changes.
     let (mut text, content_changes) = match content_changes
@@ -123,6 +145,21 @@ mod tests {
             expect_valid_apply_document_change("äöü", change(0, 1, 0, 2, "hello")),
             "ähelloü"
         );
+    }
+
+    #[test]
+    fn test_apply_single_change_utf16_surrogate_boundaries() {
+        let apply = |change| {
+            apply_document_changes("😀x\n", &NewlineIndices::new(), vec![change], |pos| {
+                InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                }
+            })
+        };
+        assert_eq!(apply(change(0, 2, 0, 3, "y")).unwrap(), "😀y\n");
+        assert!(apply(change(0, 1, 0, 2, "y")).is_err());
+        assert!(apply(change(0, 2, 0, 4, "y")).is_err());
     }
 
     #[test]

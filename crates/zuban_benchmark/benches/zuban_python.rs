@@ -3,9 +3,10 @@ use std::time::{Duration, Instant};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 use config::ProjectOptions;
+use lsp_types::{Position, Range, TextDocumentContentChangeEvent};
 use parsa_python_cst::Tree;
 use vfs::{LocalFS, PathWithScheme, VfsHandler};
-use zuban_python::{Project, RunCause};
+use zuban_python::{InputPosition, Project, RunCause};
 
 fn prepare_independent_files(file_count: usize) -> (Project, Vec<PathWithScheme>) {
     let some_code = utils::dedent(
@@ -130,6 +131,51 @@ fn bench_warm_edit_stage(c: &mut Criterion, name: &str, measure_update: bool) {
     });
 }
 
+fn bench_warm_lsp_edit(c: &mut Criterion) {
+    let (mut project, paths) = prepare_independent_files(1000);
+    check_prepared_files(&mut project, paths.clone());
+    let edited_path = paths[0].clone();
+    let original = utils::dedent(
+        r#"
+        def foo(x: int) -> int:
+            return x
+    "#,
+    );
+    let updated = original.replacen("return x", "return \"wrong\"", 1);
+    let mut use_updated = false;
+    c.bench_function("LSP edit and check 1 of 1000 prepared files", |b| {
+        b.iter(|| {
+            let range = if use_updated { 18 } else { 12 };
+            let text = if use_updated { "x" } else { "\"wrong\"" };
+            let change = TextDocumentContentChangeEvent {
+                range: Some(Range::new(Position::new(2, 11), Position::new(2, range))),
+                range_length: None,
+                text: text.into(),
+            };
+            project
+                .store_file_with_lsp_changes(edited_path.clone(), vec![change], |pos| {
+                    InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    }
+                })
+                .unwrap();
+            use_updated = !use_updated;
+            assert_eq!(
+                project
+                    .code_of_in_memory_file(&edited_path)
+                    .unwrap()
+                    .trim_end(),
+                if use_updated { &updated } else { &original }.trim_end()
+            );
+            let mut document = project.document(&edited_path).unwrap();
+            let diagnostics = document.diagnostics();
+            assert_eq!(diagnostics.len(), usize::from(use_updated));
+            std::hint::black_box(diagnostics);
+        })
+    });
+}
+
 fn bench_type_checking(c: &mut Criterion) {
     let small_code = utils::dedent(
         r#"
@@ -220,6 +266,7 @@ fn bench_type_checking(c: &mut Criterion) {
     });
     bench_warm_edit_stage(c, "edit stage of 1 of 1000 prepared files", true);
     bench_warm_edit_stage(c, "check stage of 1 of 1000 prepared files", false);
+    bench_warm_lsp_edit(c);
 }
 
 // Register the benchmarks
