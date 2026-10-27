@@ -317,7 +317,7 @@ impl<'a> Matcher<'a> {
 
     #[inline]
     pub fn has_responsible_type_var_matcher(&self, tv2: &TypeVarUsage) -> bool {
-        self.find_responsible_type_var_matcher_index(tv2.in_definition, tv2.temporary_matcher_id)
+        self.find_responsible_type_var_matcher_for_usage(tv2)
             .is_some()
     }
 
@@ -425,6 +425,26 @@ impl<'a> Matcher<'a> {
         }
         None
     }
+    fn find_responsible_type_var_matcher_for_usage(&self, usage: &TypeVarUsage) -> Option<usize> {
+        let matcher_index = self.find_responsible_type_var_matcher_index(
+            usage.in_definition,
+            usage.temporary_matcher_id,
+        )?;
+        // A callable can share a definition link with a type variable whose index belongs to
+        // an enclosing generic scope. The definition alone does not establish ownership.
+        self.type_var_matchers[matcher_index]
+            .type_var_likes
+            .iter()
+            .nth(usage.index.as_usize())
+            .and_then(|candidate| match candidate {
+                TypeVarLike::TypeVar(type_var)
+                    if std::sync::Arc::ptr_eq(type_var, &usage.type_var) =>
+                {
+                    Some(matcher_index)
+                }
+                _ => None,
+            })
+    }
     fn match_or_add_type_var_if_responsible(
         &mut self,
         i_s: &InferenceState,
@@ -432,9 +452,7 @@ impl<'a> Matcher<'a> {
         value_type: &Type,
         variance: Variance,
     ) -> Option<Match> {
-        if let Some(matcher_index) =
-            self.find_responsible_type_var_matcher_index(t1.in_definition, t1.temporary_matcher_id)
-        {
+        if let Some(matcher_index) = self.find_responsible_type_var_matcher_for_usage(t1) {
             if self.check_if_unresolved_transitive_constraint(
                 TypeVarIndexed {
                     matcher_index,
