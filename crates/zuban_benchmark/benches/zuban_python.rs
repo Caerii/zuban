@@ -30,6 +30,33 @@ fn prepare_independent_files(file_count: usize) -> (Project, Vec<PathWithScheme>
     (project, paths)
 }
 
+fn prepare_deep_files(file_count: usize) -> (Project, Vec<PathWithScheme>) {
+    let code = utils::dedent(
+        r#"
+        def foo(x: int) -> int:
+            return x
+    "#,
+    );
+    let fs = LocalFS::without_watcher();
+    let mut options = ProjectOptions::default();
+    options.settings.typeshed_path = Some(test_utils::typeshed_path());
+    options
+        .settings
+        .mypy_path
+        .push(fs.normalize_rc_path(fs.unchecked_abs_path("/bench-deep")));
+    let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+    let mut paths = Vec::with_capacity(file_count);
+    for i in 0..file_count {
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(vfs.normalize_rc_path(
+            vfs.unchecked_abs_path(&format!("/bench-deep/a/b/c/d/e/test{i}.py")),
+        ));
+        project.store_in_memory_file(path.clone(), code.clone().into());
+        paths.push(path);
+    }
+    (project, paths)
+}
+
 fn prepare_independent_files_batched(file_count: usize) -> (Project, Vec<PathWithScheme>) {
     let some_code = utils::dedent(
         r#"
@@ -86,8 +113,12 @@ fn prepare_reusable_project() -> (Project, ProjectOptions) {
     (base, options)
 }
 
-fn bench_warm_edit_stage(c: &mut Criterion, name: &str, measure_update: bool) {
-    let (mut project, paths) = prepare_independent_files(1000);
+fn bench_warm_edit_stage(c: &mut Criterion, name: &str, measure_update: bool, deep: bool) {
+    let (mut project, paths) = if deep {
+        prepare_deep_files(1000)
+    } else {
+        prepare_independent_files(1000)
+    };
     check_prepared_files(&mut project, paths.clone());
     let edited_path = paths[0].clone();
     let original = utils::dedent(
@@ -308,8 +339,10 @@ fn bench_type_checking(c: &mut Criterion) {
             std::hint::black_box(diagnostics);
         })
     });
-    bench_warm_edit_stage(c, "edit stage of 1 of 1000 prepared files", true);
-    bench_warm_edit_stage(c, "check stage of 1 of 1000 prepared files", false);
+    bench_warm_edit_stage(c, "edit stage of 1 of 1000 prepared files", true, false);
+    bench_warm_edit_stage(c, "check stage of 1 of 1000 prepared files", false, false);
+    bench_warm_edit_stage(c, "edit stage of deep prepared file", true, true);
+    bench_warm_edit_stage(c, "check stage of deep prepared file", false, true);
     bench_warm_lsp_edit(c);
     bench_warm_multi_lsp_edit(c, 32);
     bench_warm_multi_lsp_edit(c, 256);
