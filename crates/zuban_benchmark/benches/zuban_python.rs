@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 use config::ProjectOptions;
 use vfs::PathWithScheme;
@@ -28,6 +28,10 @@ fn prepare_independent_files(file_count: usize) -> (Project, Vec<PathWithScheme>
 
 fn check_independent_files(file_count: usize) {
     let (mut project, paths) = prepare_independent_files(file_count);
+    check_prepared_files(&mut project, paths);
+}
+
+fn check_prepared_files(project: &mut Project, paths: Vec<PathWithScheme>) {
     for path in paths {
         let mut document = project
             .document(&path)
@@ -52,6 +56,13 @@ fn bench_type_checking(c: &mut Criterion) {
     });
     c.bench_function("type check 1000 files", |b| {
         b.iter(|| check_independent_files(1000))
+    });
+    c.bench_function("type check 1000 prepared files", |b| {
+        b.iter_batched(
+            || prepare_independent_files(1000),
+            |(mut project, paths)| check_prepared_files(&mut project, paths),
+            BatchSize::SmallInput,
+        )
     });
 }
 
