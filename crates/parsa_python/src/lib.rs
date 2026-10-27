@@ -499,6 +499,27 @@ mod tests {
     }
 
     #[test]
+    fn test_assignment_alternatives() {
+        for code in [
+            "x = (((1)))\n",
+            "x = y = z\n",
+            "x, y = y, x\n",
+            "[x, y] = [1, 2]\n",
+            "x: int = 1\n",
+            "x += 1\n",
+        ] {
+            let tree = parse(code.into());
+            assert!(
+                tree.internal_tree
+                    .nodes
+                    .iter()
+                    .all(|node| !node.type_.is_error_recovery()),
+                "Unexpected error node in {code}"
+            );
+        }
+    }
+
+    #[test]
     fn test_avoid_crash_from_github_issue_60() {
         parse("    >\\".into());
         parse("    >\\\n".into());
