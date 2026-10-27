@@ -122,16 +122,9 @@ impl NewlineIndices {
             }
             InputPosition::CodePoints { line, column } => {
                 let (start, rest_line) = line_infos(line)?;
-                let mut byte = start;
-                let mut count = 0;
-                for c in rest_line.chars().take(column) {
-                    byte += c.len_utf8() as CodeIndex;
-                    count += 1;
-                }
-                BytePositionInfos {
-                    byte,
-                    column_out_of_bounds: count < column,
-                }
+                let mut infos = codepoints_to_utf8_byte_offset(rest_line, column);
+                infos.byte += start;
+                infos
             }
         })
     }
@@ -207,12 +200,36 @@ impl NewlineIndices {
     }
 }
 
+fn ascii_prefix_byte_offset(s: &str, column: usize) -> Option<CodeIndex> {
+    s.as_bytes()
+        .get(..column)
+        .filter(|prefix| prefix.is_ascii())
+        .map(|_| column as CodeIndex)
+}
+
+fn codepoints_to_utf8_byte_offset(s: &str, column: usize) -> BytePositionInfos {
+    if let Some(byte) = ascii_prefix_byte_offset(s, column) {
+        return BytePositionInfos {
+            byte,
+            column_out_of_bounds: false,
+        };
+    }
+    let mut byte = 0;
+    let mut count = 0;
+    for c in s.chars().take(column) {
+        byte += c.len_utf8() as CodeIndex;
+        count += 1;
+    }
+    BytePositionInfos {
+        byte,
+        column_out_of_bounds: count < column,
+    }
+}
+
 fn utf16_to_utf8_byte_offset(s: &str, utf16_pos: usize) -> anyhow::Result<BytePositionInfos> {
-    if let Some(prefix) = s.as_bytes().get(..utf16_pos)
-        && prefix.is_ascii()
-    {
+    if let Some(byte) = ascii_prefix_byte_offset(s, utf16_pos) {
         return Ok(BytePositionInfos {
-            byte: utf16_pos as CodeIndex,
+            byte,
             column_out_of_bounds: false,
         });
     }
@@ -381,6 +398,25 @@ mod tests {
                     code,
                     InputPosition::Utf16CodeUnits { line: 0, column: 2 }
                 )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_codepoint_offsets_with_non_ascii_first_character() {
+        let code = "😀x";
+        let indices = NewlineIndices::new();
+        for (column, byte) in [(0, 0), (1, 4), (2, 5)] {
+            assert_eq!(
+                indices
+                    .line_column_to_safe_byte(code, InputPosition::CodePoints { line: 0, column })
+                    .unwrap(),
+                byte
+            );
+        }
+        assert!(
+            indices
+                .line_column_to_safe_byte(code, InputPosition::CodePoints { line: 0, column: 3 })
                 .is_err()
         );
     }
