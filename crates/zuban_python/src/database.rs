@@ -1216,8 +1216,22 @@ impl Database {
     }
 
     pub fn try_to_reuse_project_resources_for_tests(&mut self, options: ProjectOptions) -> Self {
+        let base_settings = &self.project.settings;
+        let reuse_sys_path = !options.settings.add_global_packages_default
+            && options.settings.environment.is_none()
+            && base_settings.environment.is_none()
+            && options.settings.python_version == base_settings.python_version
+            && options.settings.add_global_packages_default
+                == base_settings.add_global_packages_default
+            && options.settings.prepended_site_packages == base_settings.prepended_site_packages;
         let project = PythonProject {
-            sys_path: sys_path::create_sys_path(&*self.vfs.handler, &options.settings),
+            // Test projects with the same Python installation inputs can reuse the base
+            // discovery result. Most variants change checker flags rather than sys.path.
+            sys_path: if reuse_sys_path {
+                self.project.sys_path.clone()
+            } else {
+                sys_path::create_sys_path(&*self.vfs.handler, &options.settings)
+            },
             settings: options.settings,
             flags: options.flags.finalize(),
             overrides: options.overrides,

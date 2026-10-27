@@ -1,7 +1,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 use config::ProjectOptions;
-use vfs::PathWithScheme;
+use vfs::{LocalFS, PathWithScheme, VfsHandler};
 use zuban_python::{Project, RunCause};
 
 fn prepare_independent_files(file_count: usize) -> (Project, Vec<PathWithScheme>) {
@@ -64,12 +64,38 @@ fn check_prepared_files(project: &mut Project, paths: Vec<PathWithScheme>) {
     }
 }
 
+fn prepare_reusable_project() -> (Project, ProjectOptions) {
+    let mut options = ProjectOptions::mypy_default();
+    options.settings.typeshed_path = Some(test_utils::typeshed_path());
+    options.settings.add_global_packages_default = false;
+    let fs = LocalFS::without_watcher();
+    let base_path = if cfg!(windows) {
+        r"C:\mypylike\"
+    } else {
+        "/mypylike/"
+    };
+    options
+        .settings
+        .mypy_path
+        .push(fs.normalize_rc_path(fs.unchecked_abs_path(base_path)));
+    let base = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+    (base, options)
+}
+
 fn bench_type_checking(c: &mut Criterion) {
     c.bench_function("project setup", |b| {
         b.iter(|| {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
             std::hint::black_box(Project::without_watcher(options, RunCause::TypeChecking))
+        })
+    });
+    let (mut base_project, reuse_options) = prepare_reusable_project();
+    c.bench_function("project reuse for tests", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                base_project.try_to_reuse_project_resources_for_tests(reuse_options.clone()),
+            )
         })
     });
     c.bench_function("insert 1000 files", |b| {
