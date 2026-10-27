@@ -43,10 +43,14 @@ create_grammar!(
 
     // SIMPLE STATEMENTS
     // =================
+    // The separate, omissible RHS accepts ordinary assignments without first
+    // reparsing a parenthesized expression as another chained target.
     assignment:
+        | star_targets "=" ordinary_assignment_rhs
         | (star_targets "=" )+ (yield_expr | star_expressions)
         | single_target annotation ["=" (yield_expr | star_expressions)]
         | single_target augassign (yield_expr | star_expressions)
+    ordinary_assignment_rhs:? (yield_expr | star_expressions) !"="
 
     augassign: ("+=" | "-=" | "*=" | "@=" | "/=" | "%=" | "&=" | "|=" | "^=" |
                 "<<=" | ">>=" | "**=" | "//=")
@@ -503,8 +507,12 @@ mod tests {
         for code in [
             "x = (((1)))\n",
             "x = y = z\n",
+            "x = (y) = z\n",
             "x, y = y, x\n",
             "[x, y] = [1, 2]\n",
+            "x = f(a=1)\n",
+            "x = lambda a=1: a\n",
+            "x = (y := 1)\n",
             "x: int = 1\n",
             "x += 1\n",
         ] {

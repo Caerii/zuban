@@ -528,6 +528,8 @@ impl<'a, T: Token> Grammar<T> {
         if tos_mut.dfa_state.node_may_be_omitted
             && plan.mode != PlanMode::LeftRecursive
             && tos_mut.children_count == 1
+            // A rollback may have removed the omitted node's first child.
+            && tos_mut.tree_node_index < stack.tree_nodes.len()
         {
             tos_mut.children_count = 1;
             tos_mut.latest_child_node_index = tos_mut.tree_node_index + 1;

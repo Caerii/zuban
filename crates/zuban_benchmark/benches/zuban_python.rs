@@ -270,6 +270,14 @@ fn bench_type_checking(c: &mut Criterion) {
     c.bench_function("parse 100 assignments", |b| {
         b.iter(|| std::hint::black_box(Tree::parse(assignments.clone())))
     });
+    let chained_assignments = (0..100)
+        .map(|i| format!("x{i} = y{i} = z{i}\n"))
+        .collect::<Vec<_>>()
+        .concat()
+        .into_boxed_str();
+    c.bench_function("parse 100 chained assignments", |b| {
+        b.iter(|| std::hint::black_box(Tree::parse(chained_assignments.clone())))
+    });
     let comments = "# a comment\n".repeat(100).into_boxed_str();
     c.bench_function("parse 100 comments", |b| {
         b.iter(|| std::hint::black_box(Tree::parse(comments.clone())))
