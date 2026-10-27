@@ -4262,7 +4262,9 @@ impl<'db, 'file> Inference<'db, 'file, '_> {
                 );
 
                 let self_to_inferred = |is_classmethod: bool| {
-                    let Some(cls) = self.i_s.current_class() else {
+                    // Queries such as documentation may infer a method parameter from file
+                    // context, even though the function still has a known parent class.
+                    let Some(cls) = self.i_s.current_class().or(func.class) else {
                         recoverable_error!("Expected a class in i_s because we're on a self param");
                         return Inferred::new_any(AnyCause::Internal);
                     };
