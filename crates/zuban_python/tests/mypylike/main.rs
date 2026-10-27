@@ -2,7 +2,7 @@ mod ide;
 
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, HashMap, hash_map::Entry},
+    collections::{BinaryHeap, hash_map::Entry},
     env,
     fs::{read_dir, read_to_string},
     path::{Path, PathBuf},
@@ -20,7 +20,7 @@ use config::{
 use ide::find_and_check_ide_tests;
 use regex::{Captures, Regex, Replacer};
 use test_utils::{Step, calculate_steps};
-use utils::FastHashSet;
+use utils::{FastHashMap, FastHashSet};
 use vfs::{NormalizedPath, PathWithScheme, SimpleLocalFS, VfsHandler};
 use zuban_python::{Project, RunCause};
 
@@ -937,7 +937,7 @@ struct ProjectsCache {
     command: Command,
     base_project: Option<Project>,
     base_version: PythonVersion,
-    map: HashMap<(Settings, TypeCheckerFlags), Project>,
+    map: FastHashMap<(Settings, TypeCheckerFlags), Project>,
     run_cause: RunCause,
 }
 
@@ -1236,7 +1236,7 @@ struct Skipped {
 
 struct SkippedIndex {
     exact: FastHashSet<String>,
-    exact_for_file: HashMap<String, FastHashSet<String>>,
+    exact_for_file: FastHashMap<String, FastHashSet<String>>,
     patterns: Vec<Skipped>,
 }
 
@@ -1280,7 +1280,7 @@ fn skipped() -> SkippedIndex {
 
     let mut index = SkippedIndex {
         exact: FastHashSet::default(),
-        exact_for_file: HashMap::new(),
+        exact_for_file: FastHashMap::default(),
         patterns: Vec::new(),
     };
     for skip in file
