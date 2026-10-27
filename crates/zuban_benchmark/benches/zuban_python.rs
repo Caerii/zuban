@@ -176,6 +176,50 @@ fn bench_warm_lsp_edit(c: &mut Criterion) {
     });
 }
 
+fn bench_warm_multi_lsp_edit(c: &mut Criterion, edit_count: u32) {
+    let (mut project, paths) = prepare_independent_files(1000);
+    let edited_path = paths[0].clone();
+    let mut code = String::from("def foo(x: int) -> int:\n    return x\n");
+    for _ in 0..edit_count {
+        code.push_str("# a\n");
+    }
+    project.store_in_memory_file(edited_path.clone(), code.into_boxed_str());
+    check_prepared_files(&mut project, paths);
+    let mut use_b = false;
+    let name = format!("{edit_count} reverse LSP edits and check prepared file");
+    c.bench_function(&name, |b| {
+        b.iter(|| {
+            let replacement = if use_b { "a" } else { "b" };
+            let changes = (2..2 + edit_count)
+                .rev()
+                .map(|line| TextDocumentContentChangeEvent {
+                    range: Some(Range::new(Position::new(line, 2), Position::new(line, 3))),
+                    range_length: None,
+                    text: replacement.into(),
+                })
+                .collect();
+            project
+                .store_file_with_lsp_changes(edited_path.clone(), changes, |pos| {
+                    InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    }
+                })
+                .unwrap();
+            use_b = !use_b;
+            let code = project.code_of_in_memory_file(&edited_path).unwrap();
+            assert_eq!(
+                code.as_bytes()[code.len() - 2],
+                if use_b { b'b' } else { b'a' }
+            );
+            let mut document = project.document(&edited_path).unwrap();
+            let diagnostics = document.diagnostics();
+            assert!(diagnostics.is_empty());
+            std::hint::black_box(diagnostics);
+        })
+    });
+}
+
 fn bench_type_checking(c: &mut Criterion) {
     let small_code = utils::dedent(
         r#"
@@ -267,6 +311,8 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_warm_edit_stage(c, "edit stage of 1 of 1000 prepared files", true);
     bench_warm_edit_stage(c, "check stage of 1 of 1000 prepared files", false);
     bench_warm_lsp_edit(c);
+    bench_warm_multi_lsp_edit(c, 32);
+    bench_warm_multi_lsp_edit(c, 256);
 }
 
 // Register the benchmarks

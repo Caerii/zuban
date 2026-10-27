@@ -219,6 +219,31 @@ mod tests {
     }
 
     #[test]
+    fn test_full_replacement_then_reverse_ranges_use_replacement_lines() {
+        let old_code = "a\nb\n";
+        let old_lines = NewlineIndices::new();
+        old_lines
+            .line_column_to_safe_byte(old_code, InputPosition::CodePoints { line: 1, column: 0 })
+            .unwrap();
+        let full = TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: "first\nsecond\n".into(),
+        };
+        let changes = vec![full, change(1, 0, 1, 1, "S"), change(0, 0, 0, 1, "F")];
+        assert_eq!(
+            apply_document_changes(old_code, &old_lines, changes, |pos| {
+                InputPosition::CodePoints {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                }
+            })
+            .unwrap(),
+            "First\nSecond\n"
+        );
+    }
+
+    #[test]
     fn test_apply_change_out_of_bounds() {
         assert_eq!(
             simplified_apply_document_changes(
