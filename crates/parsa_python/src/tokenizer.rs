@@ -468,6 +468,7 @@ impl Iterator for PythonTokenizer<'_> {
 
         let start = self.index;
         let c = code_from_start(self.code, self.index);
+        let first_byte = c.as_bytes().first().copied();
         if self.previous_token_was_newline {
             if let Some(&character) = c.as_bytes().first()
                 && character != b'\n'
@@ -487,11 +488,15 @@ impl Iterator for PythonTokenizer<'_> {
             self.previous_token_was_newline = false;
         }
 
-        if let Some(match_) = NUMBER.find(c) {
+        if matches!(first_byte, Some(b'0'..=b'9' | b'.'))
+            && let Some(match_) = NUMBER.find(c)
+        {
             self.index += match_.end();
             return self.new_tok(start, false, TerminalType::Number);
         }
-        if let Some(match_) = OPERATOR.find(c) {
+        if first_byte.is_some_and(|byte| byte.is_ascii_punctuation())
+            && let Some(match_) = OPERATOR.find(c)
+        {
             let character = c.as_bytes()[0];
             if character == b';'
                 && let tok @ Some(_) = self.encountered_break_token()
@@ -517,43 +522,50 @@ impl Iterator for PythonTokenizer<'_> {
             }
             return self.new_tok(start, true, TerminalType::Operator);
         }
-        let regexes = [
-            (&*STRING, TerminalType::String),
-            (&*BYTES, TerminalType::Bytes),
-        ];
-        for &(r, token_type) in &regexes {
-            if let Some(match_) = r.find(c) {
-                let length = match_.end();
-                self.index += length;
-                if length <= 5 && {
-                    let s = match_.as_str();
-                    s.contains("'''") && !s.ends_with('"')
-                        || s.contains(r#"""""#) && !s.ends_with('\'')
-                } {
-                    return self.new_tok(start, false, TerminalType::ErrorToken);
-                }
-                return self.new_tok(start, false, token_type);
-            }
-        }
-        if let Some(match_) = F_STRING_START.find(c) {
-            self.index += match_.end();
-            self.f_string_stack.push(FStringNode {
-                quote: {
-                    let string = match_.as_str();
-                    if string.contains("''") {
-                        QuoteType::SingleTriple
-                    } else if string.contains("\"\"") {
-                        QuoteType::DoubleTriple
-                    } else if string.contains('"') {
-                        QuoteType::Double
-                    } else {
-                        QuoteType::Single
+        if matches!(
+            first_byte,
+            Some(
+                b'\'' | b'"' | b'b' | b'B' | b'r' | b'R' | b'u' | b'U' | b't' | b'T' | b'f' | b'F'
+            )
+        ) {
+            let regexes = [
+                (&*STRING, TerminalType::String),
+                (&*BYTES, TerminalType::Bytes),
+            ];
+            for &(r, token_type) in &regexes {
+                if let Some(match_) = r.find(c) {
+                    let length = match_.end();
+                    self.index += length;
+                    if length <= 5 && {
+                        let s = match_.as_str();
+                        s.contains("'''") && !s.ends_with('"')
+                            || s.contains(r#"""""#) && !s.ends_with('\'')
+                    } {
+                        return self.new_tok(start, false, TerminalType::ErrorToken);
                     }
-                },
-                parentheses_level: 0,
-                format_spec_count: 0,
-            });
-            return self.new_tok(start, false, TerminalType::FStringStart);
+                    return self.new_tok(start, false, token_type);
+                }
+            }
+            if let Some(match_) = F_STRING_START.find(c) {
+                self.index += match_.end();
+                self.f_string_stack.push(FStringNode {
+                    quote: {
+                        let string = match_.as_str();
+                        if string.contains("''") {
+                            QuoteType::SingleTriple
+                        } else if string.contains("\"\"") {
+                            QuoteType::DoubleTriple
+                        } else if string.contains('"') {
+                            QuoteType::Double
+                        } else {
+                            QuoteType::Single
+                        }
+                    },
+                    parentheses_level: 0,
+                    format_spec_count: 0,
+                });
+                return self.new_tok(start, false, TerminalType::FStringStart);
+            }
         }
 
         let name_length = self.find_name_length(c);
@@ -567,7 +579,9 @@ impl Iterator for PythonTokenizer<'_> {
             return self.new_tok(start, true, TerminalType::Name);
         }
 
-        if let Some(match_) = NEWLINE.find(c) {
+        if matches!(first_byte, Some(b'\n' | b'\r'))
+            && let Some(match_) = NEWLINE.find(c)
+        {
             self.index += match_.end();
             if self.parentheses_level == 0 && self.f_string_stack.is_empty() {
                 self.previous_token_was_newline = true;
