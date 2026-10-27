@@ -117,6 +117,7 @@ fn main() -> ExitCode {
         Settings {
             typeshed_path: Some(test_utils::typeshed_path()),
             mypy_path: mypy_path(),
+            add_global_packages_default: false, // The fixtures provide their own import roots.
             ..Default::default()
         },
         TypeCheckerFlags {

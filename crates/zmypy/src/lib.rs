@@ -163,12 +163,15 @@ mod tests {
         directory: &str,
         lookup_env_var: impl Fn(&str) -> Result<String, VarError>,
     ) -> anyhow::Result<Vec<String>> {
-        let (mut project, diagnostic_config) = project_from_cli(
+        let (local_fs, mut options, diagnostic_config) = project_options_from_cli(
             cli,
             directory,
             Some(test_utils::typeshed_path()),
             lookup_env_var,
         );
+        // Fixture diagnostics must not depend on packages installed on the host.
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::new(local_fs, options, RunCause::TypeChecking);
         let diagnostics = project.diagnostics();
         let mut diagnostics = diagnostics?
             .issues

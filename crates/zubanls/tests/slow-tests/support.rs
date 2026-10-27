@@ -98,6 +98,15 @@ impl<'a> Project<'a> {
     ) -> Server {
         // TODO let tmp_dir_path = AbsPathBuf::assert(tmp_dir.path().to_path_buf());
         let tmp_dir = write_files_from_fixture(self.fixture, self.root_dir_contains_symlink);
+        // Keep auto-import and navigation tests independent of host site-packages.
+        let version = config::Settings::default().python_version_or_default();
+        tmp_dir.write_file(
+            ".venv/pyvenv.cfg",
+            &format!(
+                "include-system-site-packages = false\nversion = {}.{}\n",
+                version.major, version.minor
+            ),
+        );
         let tmp_dir_path = tmp_dir.path_for_uri();
         let mut roots = self
             .roots
