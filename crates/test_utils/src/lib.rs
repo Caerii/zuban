@@ -33,6 +33,45 @@ pub struct Step<'code> {
 
 pub fn calculate_steps<'code>(file_name: Option<&str>, code: &'code str) -> Steps<'code> {
     let file_name = file_name.unwrap_or("We don't know the name but it shouldn't matter");
+    // Most cases have no sections or a single plain output section. Construct
+    // those directly instead of running the section regex and step map.
+    if !code.starts_with('[') {
+        let simple = if !code.contains("\n[") {
+            Some((code, ""))
+        } else if !file_name.contains("semanal-")
+            && !file_name.starts_with("parse")
+            && !file_name.starts_with("pythoneval")
+            && let Some(marker) = code.find("\n[out]")
+        {
+            let suffix = &code[marker + 1..];
+            let output = suffix
+                .strip_prefix("[out]\n")
+                .or_else(|| suffix.strip_prefix("[out]\r\n"));
+            output.and_then(|output| {
+                (!code[..marker].contains("\n[")
+                    && !output.starts_with('[')
+                    && !output.contains("\n[")
+                    && !output.contains("\n==")
+                    && !output.starts_with("=="))
+                .then_some((&code[..marker + 1], output))
+            })
+        } else {
+            None
+        };
+        if let Some((main, out)) = simple {
+            let mut step = Step {
+                out,
+                ..Default::default()
+            };
+            step.files.insert("__main__.py", main);
+            return Steps {
+                steps: vec![step],
+                flags: find_flags(main)
+                    .map(|flags| flags.split(' ').collect())
+                    .unwrap_or_default(),
+            };
+        }
+    }
     let mut steps = HashMap::<usize, Step>::new();
     steps.insert(1, Default::default());
     let mut current_step_index = 1;
