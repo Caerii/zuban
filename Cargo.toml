@@ -70,6 +70,12 @@ pre-release-hook = [
 # with test unwinding which has works on debug = <any number>. Use this for now
 debug = 1
 
+[profile.test]
+# The complete single-process mypy-like suite spends most of its time in Rust
+# code, so compile test binaries with modest optimization. Debug assertions
+# and overflow checks remain enabled.
+opt-level = 1
+
 [workspace.lints.rust]
 explicit_outlives_requirements = "warn"
 unused_extern_crates = "warn"
