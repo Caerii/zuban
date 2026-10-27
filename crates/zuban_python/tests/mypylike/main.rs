@@ -124,7 +124,7 @@ struct CliArgs {
     slowest: Option<usize>,
 }
 
-#[derive(Parser, Default)]
+#[derive(Parser, Clone, Default)]
 struct PerTestFlags {
     #[command(flatten)]
     cli: cli_args::Cli,
@@ -365,12 +365,18 @@ impl TestCase<'_, '_> {
         let flags = if steps.flags.is_empty() {
             PerTestFlags::default()
         } else {
-            // We could use PerTestFlags::try_parse_from, but that's much slower, because it recreates
-            // the Command each time.
-            let matches = projects
-                .command
-                .try_get_matches_from_mut(std::iter::once("").chain(steps.flags.into_iter()))?;
-            PerTestFlags::from_arg_matches(&matches)?
+            let key: Vec<String> = steps.flags.iter().map(|flag| (*flag).to_owned()).collect();
+            if let Some(cached) = projects.flags_cache.get(&key) {
+                cached.clone()
+            } else {
+                // Reuse the Command, then cache the parsed value for identical fixture flags.
+                let matches = projects
+                    .command
+                    .try_get_matches_from_mut(std::iter::once("").chain(steps.flags.into_iter()))?;
+                let parsed = PerTestFlags::from_arg_matches(&matches)?;
+                projects.flags_cache.insert(key, parsed.clone());
+                parsed
+            }
         };
         let steps = steps.steps;
         if flags.only_language_server && !matches!(projects.run_cause, RunCause::LanguageServer)
@@ -939,6 +945,7 @@ struct ProjectsCache {
     base_version: PythonVersion,
     map: FastHashMap<(Settings, TypeCheckerFlags), Project>,
     run_cause: RunCause,
+    flags_cache: FastHashMap<Vec<String>, PerTestFlags>,
 }
 
 fn set_mypy_path(options: &mut ProjectOptions) {
@@ -965,6 +972,7 @@ impl ProjectsCache {
             base_project: reuse_db.then(|| Project::without_watcher(po, run_cause)),
             base_version,
             run_cause,
+            flags_cache: FastHashMap::default(),
             map: Default::default(),
         }
     }

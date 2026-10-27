@@ -10,7 +10,7 @@ use vfs::{AbsPath, SimpleLocalFS, VfsHandler};
 
 use clap::Parser;
 
-#[derive(Parser, Default, Debug)]
+#[derive(Parser, Clone, Default, Debug)]
 pub struct Cli {
     // Additional options that are not present in zmypy
     /// Choosing a mode sets the basic preset of flags. The default mode is not mypy-compatible.
