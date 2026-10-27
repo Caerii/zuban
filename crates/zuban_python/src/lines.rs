@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::bail;
 use parsa_python_cst::CodeIndex;
@@ -15,7 +15,7 @@ pub fn split_lines(code: &str) -> impl Iterator<Item = &str> {
 }
 
 #[derive(Clone)]
-pub(crate) struct NewlineIndices(OnceLock<Box<[CodeIndex]>>);
+pub(crate) struct NewlineIndices(OnceLock<Arc<[CodeIndex]>>);
 
 impl NewlineIndices {
     pub fn new() -> Self {
@@ -28,7 +28,7 @@ impl NewlineIndices {
             for m in NEWLINES.find_iter(code) {
                 v.push(m.end() as CodeIndex);
             }
-            v.into_boxed_slice()
+            Arc::from(v)
         })
     }
 
