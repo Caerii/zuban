@@ -785,11 +785,9 @@ impl FlowAnalysis {
         }
         for entry in entries.iter() {
             if entry.key.equals(db, &new_entry.key) {
-                if entry.type_ == EntryKind::OriginalDeclaration {
-                    return;
-                } else {
-                    recoverable_error!("Did not expect an already existing entry")
-                }
+                // Circular imports can infer an assignment before the declaration is
+                // initialized. Keep that inferred entry instead of appending a duplicate.
+                return;
             }
         }
         entries.push(new_entry)
