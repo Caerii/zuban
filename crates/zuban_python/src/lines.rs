@@ -83,9 +83,7 @@ impl NewlineIndices {
             };
             let start = if line == 0 { 0 } else { lines[line - 1] };
             let mut line_code = &code[start as usize..*next_line_start as usize - 1];
-            if cfg!(windows)
-                && let Some(l) = line_code.strip_suffix('\r')
-            {
+            if let Some(l) = line_code.strip_suffix('\r') {
                 line_code = l
             }
             Ok((start, line_code))
@@ -124,15 +122,15 @@ impl NewlineIndices {
             }
             InputPosition::CodePoints { line, column } => {
                 let (start, rest_line) = line_infos(line)?;
-                let byte = start
-                    + rest_line
-                        .chars()
-                        .take(column)
-                        .map(|c| c.len_utf8() as CodeIndex)
-                        .sum::<CodeIndex>();
+                let mut byte = start;
+                let mut count = 0;
+                for c in rest_line.chars().take(column) {
+                    byte += c.len_utf8() as CodeIndex;
+                    count += 1;
+                }
                 BytePositionInfos {
                     byte,
-                    column_out_of_bounds: rest_line.chars().take(column).count() < column,
+                    column_out_of_bounds: count < column,
                 }
             }
         })
@@ -166,9 +164,7 @@ impl NewlineIndices {
                 let Some(mut result) = code.get(previous..line_index - 1) else {
                     panic!("Wanted to access {previous}..{line_index} for code {code:?}");
                 };
-                if cfg!(windows)
-                    && let Some(l) = result.strip_suffix('\r')
-                {
+                if let Some(l) = result.strip_suffix('\r') {
                     result = l
                 }
                 previous = line_index;
@@ -212,6 +208,14 @@ impl NewlineIndices {
 }
 
 fn utf16_to_utf8_byte_offset(s: &str, utf16_pos: usize) -> anyhow::Result<BytePositionInfos> {
+    if let Some(prefix) = s.as_bytes().get(..utf16_pos)
+        && prefix.is_ascii()
+    {
+        return Ok(BytePositionInfos {
+            byte: utf16_pos as CodeIndex,
+            column_out_of_bounds: false,
+        });
+    }
     let mut utf16_count = 0;
 
     for (utf8_idx, c) in s.char_indices() {
@@ -317,6 +321,68 @@ mod tests {
         assert_eq!(indices.lines("a\r\nb\rc\né\r\n\n"), [3, 5, 7, 11, 12]);
         let indices = NewlineIndices::new();
         assert_eq!(indices.lines("\r\r\n\n"), [1, 3, 4]);
+    }
+
+    #[test]
+    fn test_crlf_columns_exclude_carriage_return() {
+        let code = "a\r\nb\n";
+        let indices = NewlineIndices::new();
+        for input in [
+            InputPosition::Utf8Bytes { line: 0, column: 1 },
+            InputPosition::Utf16CodeUnits { line: 0, column: 1 },
+            InputPosition::CodePoints { line: 0, column: 1 },
+        ] {
+            assert_eq!(indices.line_column_to_safe_byte(code, input).unwrap(), 1);
+        }
+        for input in [
+            InputPosition::Utf8Bytes { line: 0, column: 2 },
+            InputPosition::Utf16CodeUnits { line: 0, column: 2 },
+            InputPosition::CodePoints { line: 0, column: 2 },
+        ] {
+            assert!(indices.line_column_to_safe_byte(code, input).is_err());
+        }
+        assert_eq!(
+            indices.numbers_with_lines(code, 0).collect::<Vec<_>>(),
+            [(0, "a"), (1, "b")]
+        );
+    }
+
+    #[test]
+    fn test_codepoint_and_utf16_offsets_across_unicode() {
+        let code = "a😀éz";
+        let indices = NewlineIndices::new();
+        for (column, byte) in [(0, 0), (1, 1), (2, 5), (3, 7), (4, 8)] {
+            assert_eq!(
+                indices
+                    .line_column_to_safe_byte(code, InputPosition::CodePoints { line: 0, column })
+                    .unwrap(),
+                byte
+            );
+        }
+        for (column, byte) in [(0, 0), (1, 1), (3, 5), (4, 7), (5, 8)] {
+            assert_eq!(
+                indices
+                    .line_column_to_safe_byte(
+                        code,
+                        InputPosition::Utf16CodeUnits { line: 0, column }
+                    )
+                    .unwrap(),
+                byte
+            );
+        }
+        assert!(
+            indices
+                .line_column_to_safe_byte(code, InputPosition::CodePoints { line: 0, column: 5 })
+                .is_err()
+        );
+        assert!(
+            indices
+                .line_column_to_safe_byte(
+                    code,
+                    InputPosition::Utf16CodeUnits { line: 0, column: 2 }
+                )
+                .is_err()
+        );
     }
 
     #[test]
