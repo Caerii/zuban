@@ -1,5 +1,4 @@
 use std::{
-    collections::hash_map::Entry,
     path::Path,
     sync::{
         Arc, Mutex, OnceLock,
@@ -570,13 +569,13 @@ impl TypeshedSymbols {
                         found.files.push(TypeshedFile {
                             path: (**file.file_path(db)).to_string(),
                         });
-                        let insert_symbol = |found: &mut Self, name: &str| match found
-                            .symbols_to_files
-                            .entry(name.to_string())
-                        {
-                            Entry::Occupied(mut occupied) => occupied.get_mut().insert_last(index),
-                            Entry::Vacant(vacant) => {
-                                vacant.insert_entry(SingleLinkedList::new(index));
+                        let insert_symbol = |found: &mut Self, name: &str| {
+                            if let Some(files) = found.symbols_to_files.get_mut(name) {
+                                files.insert_last(index);
+                            } else {
+                                found
+                                    .symbols_to_files
+                                    .insert(name.to_string(), SingleLinkedList::new(index));
                             }
                         };
                         match &entry.parent {
