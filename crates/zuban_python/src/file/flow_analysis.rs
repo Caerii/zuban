@@ -59,6 +59,22 @@ thread_local! {
     static FLOW_ANALYSIS_INNER: RefCell<Rc<FlowAnalysis>> = RefCell::new(Rc::new(FlowAnalysis::default()));
 }
 
+struct RestoreFlowAnalysis(Option<Rc<FlowAnalysis>>);
+
+impl RestoreFlowAnalysis {
+    fn restore(mut self) -> Rc<FlowAnalysis> {
+        FLOW_ANALYSIS_INNER.replace(self.0.take().unwrap())
+    }
+}
+
+impl Drop for RestoreFlowAnalysis {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0.take() {
+            FLOW_ANALYSIS_INNER.replace(previous);
+        }
+    }
+}
+
 pub struct FlowAnalysisHelper();
 
 impl FlowAnalysisHelper {
@@ -119,13 +135,45 @@ impl FlowAnalysisHelper {
         callable: impl FnOnce(&FlowAnalysis) -> T,
     ) -> FlowAnalysisResult<T> {
         let new = Rc::new(FlowAnalysis::default());
-        let old = FLOW_ANALYSIS_INNER.replace(new.clone());
+        let restore = RestoreFlowAnalysis(Some(FLOW_ANALYSIS_INNER.replace(new.clone())));
         let result = callable(&new);
-        let inner = FLOW_ANALYSIS_INNER.replace(old);
-        return FlowAnalysisResult {
+        let inner = restore.restore();
+        FlowAnalysisResult {
             result,
             unfinished_partials: inner.partials_in_module.take(),
-        };
+        }
+    }
+}
+
+#[cfg(test)]
+mod flow_context_tests {
+    use super::*;
+
+    #[test]
+    fn nested_flow_context_restores_outer_context_after_panic() {
+        let original = FLOW_ANALYSIS.with(|flow| flow as *const FlowAnalysis);
+
+        let _ = FLOW_ANALYSIS.with_new_empty_without_unfinished_partial_checking(|outer| {
+            let outer = outer as *const FlowAnalysis;
+            assert_ne!(outer, original);
+
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                FLOW_ANALYSIS.with_new_empty_without_unfinished_partial_checking(|inner| {
+                    assert_ne!(inner as *const FlowAnalysis, outer);
+                    panic!("test nested flow context restoration");
+                });
+            }));
+            assert!(panic.is_err());
+            assert_eq!(
+                FLOW_ANALYSIS.with(|flow| flow as *const FlowAnalysis),
+                outer
+            );
+        });
+
+        assert_eq!(
+            FLOW_ANALYSIS.with(|flow| flow as *const FlowAnalysis),
+            original
+        );
     }
 }
 
