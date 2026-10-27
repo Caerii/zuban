@@ -1081,13 +1081,13 @@ fn cached_core_stub_tree(code: Box<str>) -> Tree {
     if code.len() > 1024 * 1024 {
         return Tree::parse(code);
     }
-    static TREES: OnceLock<Mutex<HashMap<Box<str>, Tree>>> = OnceLock::new();
-    let trees = TREES.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(tree) = trees.lock().unwrap().get(code.as_ref()).cloned() {
+    static TREES: OnceLock<RwLock<HashMap<Box<str>, Tree>>> = OnceLock::new();
+    let trees = TREES.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(tree) = trees.read().unwrap().get(code.as_ref()).cloned() {
         return tree;
     }
     let tree = Tree::parse(code);
-    let mut trees = trees.lock().unwrap();
+    let mut trees = trees.write().unwrap();
     if trees.len() >= 32 {
         trees.clear();
     }
