@@ -615,6 +615,10 @@ class SyntaxTreeNode:
     def walk(self: _NodeType) -> _NodeType:
         return self.walk()
 
+class Child(SyntaxTreeNode): ...
+reveal_type(SyntaxTreeNode().walk())  # N: Revealed type is "__main__.SyntaxTreeNode"
+reveal_type(Child().walk())  # N: Revealed type is "__main__.Child"
+
 [case reject_self_if_self_type_var_bound]
 # flags: --mode default
 # From conformance tests (generics_self_usage.py)

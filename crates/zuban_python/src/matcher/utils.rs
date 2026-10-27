@@ -245,7 +245,12 @@ impl CalculatedTypeArgs {
                     if self.in_definition == usage.in_definition() {
                         if let Some(args) = self.type_arguments.as_ref() {
                             return Some(args[usage.index()].clone());
-                        } else {
+                        // A recursive call inside the defining function keeps its return
+                        // TypeVar symbolic until the receiver is known at the call site.
+                        } else if i_s
+                            .current_function()
+                            .is_none_or(|func| func.node_ref.as_link() != usage.in_definition())
+                        {
                             recoverable_error!(
                                 "Missing type argument replacement for return type {} ",
                                 return_type.format_short(i_s.db)
