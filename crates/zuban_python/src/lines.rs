@@ -25,8 +25,23 @@ impl NewlineIndices {
     fn lines(&self, code: &str) -> &[CodeIndex] {
         self.0.get_or_init(|| {
             let mut v = vec![];
-            for m in NEWLINES.find_iter(code) {
-                v.push(m.end() as CodeIndex);
+            let bytes = code.as_bytes();
+            let mut index = 0;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\r' => {
+                        index += 1;
+                        if bytes.get(index) == Some(&b'\n') {
+                            index += 1;
+                        }
+                        v.push(index as CodeIndex);
+                    }
+                    b'\n' => {
+                        index += 1;
+                        v.push(index as CodeIndex);
+                    }
+                    _ => index += 1,
+                }
             }
             Arc::from(v)
         })
@@ -296,6 +311,14 @@ mod tests {
                 .line_column_to_byte(code, InputPosition::Utf8Bytes { line: 0, column: 1 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_newline_indices_mixed_endings() {
+        let indices = NewlineIndices::new();
+        assert_eq!(indices.lines("a\r\nb\rc\né\r\n\n"), [3, 5, 7, 11, 12]);
+        let indices = NewlineIndices::new();
+        assert_eq!(indices.lines("\r\r\n\n"), [1, 3, 4]);
     }
 
     #[test]
