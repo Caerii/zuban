@@ -847,7 +847,7 @@ fn initialize_and_return_wanted_output(
 
 fn maybe_parent(local_fs: &SimpleLocalFS, code: &str) -> Option<PathWithScheme> {
     let parent = code.strip_prefix("# parent: ")?;
-    let path = &parent[0..parent.find(['\n', '\r'])?];
+    let path = parent.split(['\n', '\r']).next()?;
     Some(base_path_join(local_fs, path))
 }
 
