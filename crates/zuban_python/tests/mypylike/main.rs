@@ -214,14 +214,36 @@ struct CommonProject {
 
 #[derive(Eq, Hash, PartialEq)]
 struct FlagProjectKey {
-    file_name: String,
-    from_mypy_test_suite: bool,
+    fixture_kind: FixtureConfigKind,
     mypy_compatible: bool,
     no_empty: bool,
     flags: Vec<String>,
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum FixtureConfigKind {
+    Normal,
+    ErrorCodes,
+    Columns,
+    RecursiveTypes,
+    CaseInsensitive,
+    FineGrained,
+    Abstract,
+}
+
 impl TestCase<'_, '_> {
+    fn fixture_config_kind(&self) -> FixtureConfigKind {
+        match self.file_name {
+            "check-errorcodes" => FixtureConfigKind::ErrorCodes,
+            "check-columns" => FixtureConfigKind::Columns,
+            "check-recursive-types" => FixtureConfigKind::RecursiveTypes,
+            "check-modules-case" => FixtureConfigKind::CaseInsensitive,
+            "check-abstract" => FixtureConfigKind::Abstract,
+            name if name.starts_with("fine-grained") => FixtureConfigKind::FineGrained,
+            _ => FixtureConfigKind::Normal,
+        }
+    }
+
     fn initialize_flags<'p>(
         &self,
         projects: &'p mut ProjectsCache,
@@ -318,27 +340,24 @@ impl TestCase<'_, '_> {
             );
         };
 
-        match self.file_name {
-            "check-errorcodes" => diagnostic_config.show_error_codes = true,
-            "check-columns" => diagnostic_config.show_column_numbers = true,
-            "check-recursive-types" => {
+        match self.fixture_config_kind() {
+            FixtureConfigKind::ErrorCodes => diagnostic_config.show_error_codes = true,
+            FixtureConfigKind::Columns => diagnostic_config.show_column_numbers = true,
+            FixtureConfigKind::RecursiveTypes => {
                 // This feels very broken, but for now we disable these errors, because they don't feel
                 // wrong, but Mypy does not have them.
                 config.disabled_error_codes.push("used-before-def".into())
             }
-            "check-modules-case" => {
+            FixtureConfigKind::CaseInsensitive => {
                 // These tests are checking for case insensitive file systems like macOS, Windows
                 config.case_sensitive = false;
             }
-            _ => {
-                if self.file_name.starts_with("fine-grained") {
-                    config.local_partial_types = true;
-                }
-            }
+            FixtureConfigKind::FineGrained => config.local_partial_types = true,
+            FixtureConfigKind::Normal | FixtureConfigKind::Abstract => {}
         }
         // This is simply for testing and mirrors how mypy does it.
-        config.allow_empty_bodies =
-            !self.name.ends_with("_no_empty") && self.file_name != "check-abstract";
+        config.allow_empty_bodies = !self.name.ends_with("_no_empty")
+            && self.fixture_config_kind() != FixtureConfigKind::Abstract;
 
         flags.cli.mypy_options.allow_redefinition |= flags.allow_redefinition_old;
         flags.cli.mypy_options.allow_redefinition |= flags.allow_redefinition_old;
@@ -452,16 +471,14 @@ impl TestCase<'_, '_> {
         }
         let local_fs = SimpleLocalFS::without_watcher();
         let no_typecheck = flags.no_typecheck;
-        // A flag-bearing case can share the resolved project and diagnostic settings with
-        // another case from the same fixture. Config files and package directives can vary by
-        // case, so those continue through the full setup path.
+        // Flag-bearing cases with the same effective fixture settings can share the resolved
+        // project and diagnostic config. Config files and package directives vary per case.
         let flag_project_key = (!flags_key.is_empty()
             && !steps[0].files.contains_key("mypy.ini")
             && !steps[0].files.contains_key("pyproject.toml")
             && !self.code.starts_with("# pkgs:"))
         .then(|| FlagProjectKey {
-            file_name: self.file_name.to_owned(),
-            from_mypy_test_suite: self.from_mypy_test_suite,
+            fixture_kind: self.fixture_config_kind(),
             mypy_compatible: mode == Mode::Mypy,
             no_empty: self.name.ends_with("_no_empty"),
             flags: flags_key,
