@@ -286,17 +286,26 @@ fn reserve_file_load(files_loaded: &AtomicUsize) -> bool {
     files_loaded.fetch_add(1, Ordering::Relaxed) < FILE_LOAD_LIMIT
 }
 
-fn all_recursive_public_typeshed_file_entries(
+fn all_recursive_typeshed_file_entries(
     db: &Database,
     entries: &Entries,
+    include_private: bool,
 ) -> Vec<Arc<FileEntry>> {
-    fn recurse(db: &Database, found: &mut Vec<Arc<FileEntry>>, entries: &Entries) {
+    fn recurse(
+        db: &Database,
+        found: &mut Vec<Arc<FileEntry>>,
+        entries: &Entries,
+        include_private: bool,
+    ) {
         entries.borrow().iter().for_each(|(_, entry)| {
             match entry {
                 DirectoryEntry::File(entry) => {
                     // Underscored modules are private, while dunder modules are not like
                     // __init__.pyi
-                    if entry.name.starts_with('_') && !entry.name.starts_with("__") {
+                    if !include_private
+                        && entry.name.starts_with('_')
+                        && !entry.name.starts_with("__")
+                    {
                         return;
                     }
                     found.push(entry.clone())
@@ -304,17 +313,18 @@ fn all_recursive_public_typeshed_file_entries(
                 DirectoryEntry::Directory(dir) => {
                     // Underscored packages are private
                     // There's a directory in stdlib called @tests
-                    if dir.name.starts_with('_') || dir.name.starts_with('@') {
+                    if !include_private && (dir.name.starts_with('_') || dir.name.starts_with('@'))
+                    {
                         return;
                     }
-                    recurse(db, found, Directory::entries(&db.vfs, dir))
+                    recurse(db, found, Directory::entries(&db.vfs, dir), include_private)
                 }
                 _ => (),
             }
         })
     }
     let mut found = vec![];
-    recurse(db, &mut found, entries);
+    recurse(db, &mut found, entries, include_private);
     found
 }
 
@@ -499,6 +509,7 @@ pub(crate) struct TypeshedSymbols {
 struct VersionedTypeshedSymbols {
     version: usize,
     typeshed_path: String,
+    source_fingerprint: u64,
     symbols: TypeshedSymbols,
 }
 
@@ -507,6 +518,33 @@ static TYPESHED_INDEXES: OnceLock<
 > = OnceLock::new();
 
 impl TypeshedSymbols {
+    fn source_fingerprint(db: &Database) -> Option<u64> {
+        let mut paths: Vec<_> = db
+            .vfs
+            .workspaces
+            .load()
+            .iter()
+            .filter(|workspace| matches!(workspace.kind, WorkspaceKind::Typeshed))
+            .flat_map(|workspace| all_recursive_typeshed_file_entries(db, &workspace.entries, true))
+            .map(|entry| entry.absolute_path(&*db.vfs.handler).path().to_string())
+            .collect();
+        paths.sort_unstable();
+        let file_hashes: Vec<_> = paths
+            .par_iter()
+            .map(|path| {
+                let mut hasher = DefaultHasher::new();
+                path.hash(&mut hasher);
+                std::fs::read(path).ok()?.hash(&mut hasher);
+                Some(hasher.finish())
+            })
+            .collect();
+        let mut hasher = DefaultHasher::new();
+        for file_hash in file_hashes {
+            file_hash?.hash(&mut hasher);
+        }
+        Some(hasher.finish())
+    }
+
     fn cache_file(cache_dir: &Path, typeshed_path: &NormalizedPath) -> PathBuf {
         let mut hasher = DefaultHasher::new();
         typeshed_path.hash(&mut hasher);
@@ -514,7 +552,7 @@ impl TypeshedSymbols {
     }
 
     fn cached(db: &Database) -> Arc<Self> {
-        const TYPESHED_CACHE_VERSION: usize = 1;
+        const TYPESHED_CACHE_VERSION: usize = 2;
         let typeshed_path = db
             .project
             .settings
@@ -550,26 +588,33 @@ impl TypeshedSymbols {
                 && std::fs::create_dir_all(&cache_dir).is_ok()
             {
                 let file = Self::cache_file(&cache_dir, &typeshed_path);
+                let source_fingerprint = Self::source_fingerprint(db);
                 if let Some(cached) = load_cache::<VersionedTypeshedSymbols>(&file)
                     && cached.version == TYPESHED_CACHE_VERSION
                     && *cached.typeshed_path.as_str() == ***typeshed_path
+                    && Some(cached.source_fingerprint) == source_fingerprint
                 {
                     return Arc::new(cached.symbols);
                 }
-                let result = VersionedTypeshedSymbols {
-                    version: TYPESHED_CACHE_VERSION,
-                    typeshed_path: typeshed_path.to_string(),
-                    symbols: cache(),
-                };
-                match utils::serialize_binary(&result) {
-                    Ok(bytes) => {
-                        if let Err(err) = std::fs::write(file, bytes) {
-                            tracing::error!("Could not save typeshed.cache: {err:?}");
+                let symbols = cache();
+                if let Some(source_fingerprint) = source_fingerprint {
+                    let result = VersionedTypeshedSymbols {
+                        version: TYPESHED_CACHE_VERSION,
+                        typeshed_path: typeshed_path.to_string(),
+                        source_fingerprint,
+                        symbols,
+                    };
+                    match utils::serialize_binary(&result) {
+                        Ok(bytes) => {
+                            if let Err(err) = std::fs::write(file, bytes) {
+                                tracing::error!("Could not save typeshed.cache: {err:?}");
+                            }
                         }
-                    }
-                    Err(err) => tracing::error!("Could not serialize typeshed.cache: {err:?}"),
-                };
-                return Arc::new(result.symbols);
+                        Err(err) => tracing::error!("Could not serialize typeshed.cache: {err:?}"),
+                    };
+                    return Arc::new(result.symbols);
+                }
+                return Arc::new(symbols);
             }
             Arc::new(cache())
         })
@@ -618,7 +663,7 @@ impl TypeshedSymbols {
         let found: Mutex<Self> = Default::default();
         for workspace in db.vfs.workspaces.load().iter() {
             if matches!(&workspace.kind, WorkspaceKind::Typeshed) {
-                all_recursive_public_typeshed_file_entries(db, &workspace.entries)
+                all_recursive_typeshed_file_entries(db, &workspace.entries, false)
                     .par_iter()
                     .for_each(|entry| {
                         let file = db
@@ -877,6 +922,33 @@ mod tests {
             &first,
             &TypeshedSymbols::cached(&first_project.db)
         ));
+
+        other.write_file(
+            "stdlib/zuban_cache_other_root.pyi",
+            "class ChangedWhileZubanWasStopped: ...\n",
+        );
+        other.write_file(
+            "stdlib/zuban_new_while_stopped.pyi",
+            "class AddedWhileZubanWasStopped: ...\n",
+        );
+        super::TYPESHED_INDEXES
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&other_root);
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(other_root.clone());
+        let restarted_project = Project::without_watcher(options, RunCause::LanguageServer);
+        let restarted = TypeshedSymbols::cached(&restarted_project.db);
+        assert!(
+            restarted
+                .lookup("UpdatedInOtherTypeshedRoot")
+                .next()
+                .is_none()
+        );
+        assert_eq!(restarted.lookup("ChangedWhileZubanWasStopped").count(), 1);
+        assert_eq!(restarted.lookup("AddedWhileZubanWasStopped").count(), 1);
 
         if let Some(cache_dir) = dirs::cache_dir() {
             let cache_file = TypeshedSymbols::cache_file(&cache_dir.join("zuban"), &other_root);
