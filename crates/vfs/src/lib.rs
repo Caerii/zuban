@@ -137,7 +137,7 @@ pub trait VfsHandler: Sync + Send {
         if cfg!(target_os = "windows") {
             // Windows allows path with mixed separators
             if let Some(found_slash) = path.find('/')
-                && found.is_none_or(|found| found <= found_slash)
+                && found.is_none_or(|found| found_slash <= found)
             {
                 found = Some(found_slash)
             }
@@ -154,7 +154,7 @@ pub trait VfsHandler: Sync + Send {
         if cfg!(target_os = "windows") {
             // Windows allows path with mixed separators
             if let Some(found_slash) = path.rfind('/')
-                && found.is_none_or(|found| found >= found_slash)
+                && found.is_none_or(|found| found_slash >= found)
             {
                 found = Some(found_slash)
             }
@@ -217,6 +217,28 @@ fn path_relative_to(from: &AbsPath, to: &Path, separator: char) -> Option<String
 #[cfg(test)]
 mod tests {
     use crate::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn split_mixed_separators_at_the_nearest_separator() {
+        let vfs = LocalFS::without_watcher();
+        assert_eq!(
+            vfs.split_off_first_item(r"C:\foo/bar\baz"),
+            ("C:", Some(r"foo/bar\baz"))
+        );
+        assert_eq!(
+            vfs.split_off_first_item(r"C:/foo\bar/baz"),
+            ("C:", Some(r"foo\bar/baz"))
+        );
+        assert_eq!(
+            vfs.split_off_last_item(r"C:\foo/bar\baz"),
+            (Some(r"C:\foo/bar"), "baz")
+        );
+        assert_eq!(
+            vfs.split_off_last_item(r"C:/foo\bar/baz"),
+            (Some(r"C:/foo\bar"), "baz")
+        );
+    }
 
     #[test]
     fn test_path_relative_to() {

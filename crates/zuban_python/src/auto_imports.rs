@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use utils::FastHashMap;
 use vfs::{
-    Directory, DirectoryEntry, Entries, FileEntry, NormalizedPath, Parent, PathWithScheme,
+    AbsPath, Directory, DirectoryEntry, Entries, FileEntry, NormalizedPath, Parent, PathWithScheme,
     WorkspaceKind,
 };
 
@@ -486,7 +486,7 @@ struct TypeshedFile {
 type TypeshedFileIndex = u32;
 
 #[derive(Serialize, Deserialize, Default, Debug)]
-struct TypeshedSymbols {
+pub(crate) struct TypeshedSymbols {
     files: Vec<TypeshedFile>,
     toplevel_import_names: FastHashMap<String, TypeshedFileIndex>,
     // The value is the vec of a file index in the typeshed symbols.
@@ -502,6 +502,10 @@ struct VersionedTypeshedSymbols {
     symbols: TypeshedSymbols,
 }
 
+static TYPESHED_INDEXES: OnceLock<
+    Mutex<FastHashMap<Arc<NormalizedPath>, Arc<OnceLock<Arc<TypeshedSymbols>>>>>,
+> = OnceLock::new();
+
 impl TypeshedSymbols {
     fn cache_file(cache_dir: &Path, typeshed_path: &NormalizedPath) -> PathBuf {
         let mut hasher = DefaultHasher::new();
@@ -510,9 +514,6 @@ impl TypeshedSymbols {
     }
 
     fn cached(db: &Database) -> Arc<Self> {
-        static CELLS: OnceLock<
-            Mutex<FastHashMap<Arc<NormalizedPath>, Arc<OnceLock<Arc<TypeshedSymbols>>>>>,
-        > = OnceLock::new();
         const TYPESHED_CACHE_VERSION: usize = 1;
         let typeshed_path = db
             .project
@@ -530,7 +531,10 @@ impl TypeshedSymbols {
                     .clone()
             });
         let cell = {
-            let mut cells = CELLS.get_or_init(Default::default).lock().unwrap();
+            let mut cells = TYPESHED_INDEXES
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap();
             cells.entry(typeshed_path.clone()).or_default().clone()
         };
         cell.get_or_init(|| {
@@ -570,6 +574,44 @@ impl TypeshedSymbols {
             Arc::new(cache())
         })
         .clone()
+    }
+
+    pub(crate) fn invalidate_path(db: &Database, path: &AbsPath) {
+        let workspaces = db.vfs.workspaces.load();
+        if !workspaces.iter().any(|workspace| {
+            matches!(workspace.kind, WorkspaceKind::Typeshed)
+                && workspace.contains_file_path(
+                    &*db.vfs.handler,
+                    db.project.flags.case_sensitive,
+                    path,
+                )
+        }) {
+            return;
+        }
+        let typeshed_path = db
+            .project
+            .settings
+            .typeshed_path
+            .clone()
+            .unwrap_or_else(|| {
+                workspaces
+                    .iter()
+                    .find(|workspace| matches!(workspace.kind, WorkspaceKind::Typeshed))
+                    .unwrap()
+                    .root_path
+                    .clone()
+            });
+        if let Some(indexes) = TYPESHED_INDEXES.get() {
+            indexes.lock().unwrap().remove(&typeshed_path);
+        }
+        if let Some(cache_dir) = dirs::cache_dir() {
+            let file = Self::cache_file(&cache_dir.join("zuban"), &typeshed_path);
+            if let Err(err) = std::fs::remove_file(file)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("Could not remove stale typeshed index: {err:?}");
+            }
+        }
     }
 
     fn generate_typeshed_symbols(db: &Database) -> Self {
@@ -800,7 +842,7 @@ mod tests {
         let mut options = ProjectOptions::default();
         let other_root = LocalFS::without_watcher().normalized_path_from_current_dir(other.path());
         options.settings.typeshed_path = Some(other_root.clone());
-        let second_project = Project::without_watcher(options, RunCause::LanguageServer);
+        let mut second_project = Project::without_watcher(options, RunCause::LanguageServer);
         let second = TypeshedSymbols::cached(&second_project.db);
         assert_eq!(second.lookup("OnlyInOtherTypeshedRoot").count(), 1);
         assert!(!Arc::ptr_eq(&first, &second));
@@ -808,6 +850,34 @@ mod tests {
             &first,
             &TypeshedSymbols::cached(&first_project.db)
         ));
+
+        let unrelated_path = second_project
+            .vfs_handler()
+            .unchecked_abs_path(&format!("{}/unrelated.py", other.path()));
+        second_project.invalidate_path(&unrelated_path);
+        assert!(Arc::ptr_eq(
+            &second,
+            &TypeshedSymbols::cached(&second_project.db)
+        ));
+
+        other.write_file(
+            "stdlib/zuban_cache_other_root.pyi",
+            "class UpdatedInOtherTypeshedRoot: ...\n",
+        );
+        let changed_path = PathBuf::from(other.path()).join("stdlib/zuban_cache_other_root.pyi");
+        let changed_path = second_project
+            .vfs_handler()
+            .unchecked_abs_path(changed_path.to_str().unwrap());
+        second_project.invalidate_path(&changed_path);
+        let updated = TypeshedSymbols::cached(&second_project.db);
+        assert!(!Arc::ptr_eq(&second, &updated));
+        assert!(updated.lookup("OnlyInOtherTypeshedRoot").next().is_none());
+        assert_eq!(updated.lookup("UpdatedInOtherTypeshedRoot").count(), 1);
+        assert!(Arc::ptr_eq(
+            &first,
+            &TypeshedSymbols::cached(&first_project.db)
+        ));
+
         if let Some(cache_dir) = dirs::cache_dir() {
             let cache_file = TypeshedSymbols::cache_file(&cache_dir.join("zuban"), &other_root);
             if cache_file.exists() {

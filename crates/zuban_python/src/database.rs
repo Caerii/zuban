@@ -18,6 +18,7 @@ use vfs::{
 
 use crate::{
     ProjectOptions,
+    auto_imports::TypeshedSymbols,
     file::{File, SuperFile},
     lines::split_lines,
     prelude::*,
@@ -1521,6 +1522,7 @@ impl Database {
     }
 
     pub fn invalidate_path(&mut self, path: &AbsPath) {
+        TypeshedSymbols::invalidate_path(self, path);
         let invalidation = self
             .vfs
             .invalidate_path(self.project.flags.case_sensitive, path);

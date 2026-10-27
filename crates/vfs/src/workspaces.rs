@@ -571,6 +571,24 @@ impl Workspace {
         self.root_path().as_ref().starts_with(path)
     }
 
+    pub fn contains_file_path(
+        &self,
+        vfs: &dyn VfsHandler,
+        case_sensitive: bool,
+        path: &AbsPath,
+    ) -> bool {
+        if strip_path_prefix(vfs, case_sensitive, path, self.root_path()).is_some() {
+            return true;
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "ios"))]
+        {
+            if strip_path_prefix(vfs, case_sensitive, path, &self.canonicalized_path).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn root_path(&self) -> &AbsPath {
         &self.root_path
     }
