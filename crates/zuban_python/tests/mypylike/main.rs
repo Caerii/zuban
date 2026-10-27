@@ -7,7 +7,7 @@ use std::{
     fs::{read_dir, read_to_string},
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
@@ -72,6 +72,8 @@ const SKIP_MYPY_TEST_FILES: [&str; 31] = [
 const BASE_PATH_STR: &str = "/mypylike/";
 #[cfg(target_os = "windows")]
 const BASE_PATH_STR: &str = r"C:\\mypylike\";
+
+static FIXTURE_ROOT_HAS_DISK_BACKING: OnceLock<bool> = OnceLock::new();
 
 thread_local! {
     static BASE_PATH: Arc<NormalizedPath> = {
@@ -706,7 +708,11 @@ impl TestCase<'_, '_> {
                 }
             }
         }
-        project.close_in_memory_files(&flat_files);
+        if *FIXTURE_ROOT_HAS_DISK_BACKING.get_or_init(|| Path::new(BASE_PATH_STR).exists()) {
+            project.close_in_memory_files(&flat_files);
+        } else {
+            project.discard_in_memory_files(&flat_files);
+        }
         for directory in directories {
             let _ = project.delete_directory_of_in_memory_files(&directory);
         }

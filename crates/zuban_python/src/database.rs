@@ -1544,17 +1544,29 @@ impl Database {
     }
 
     pub fn close_in_memory_file(&mut self, path: &PathWithScheme) -> Result<(), &'static str> {
-        let result = self.close_in_memory_file_without_db_invalidation(path)?;
+        let result = self.close_in_memory_file_without_db_invalidation(path, false)?;
         self.handle_invalidation(result);
         Ok(())
     }
 
     pub fn close_in_memory_files(&mut self, paths: &[PathWithScheme]) {
+        self.close_in_memory_files_with_backing_policy(paths, false);
+    }
+
+    pub fn discard_in_memory_files(&mut self, paths: &[PathWithScheme]) {
+        self.close_in_memory_files_with_backing_policy(paths, true);
+    }
+
+    fn close_in_memory_files_with_backing_policy(
+        &mut self,
+        paths: &[PathWithScheme],
+        discard_without_disk_read: bool,
+    ) {
         let mut invalidation = InvalidationResult::InvalidatedFiles;
         for path in paths {
             if self.vfs.has_in_memory_path(path) {
                 invalidation |= self
-                    .close_in_memory_file_without_db_invalidation(path)
+                    .close_in_memory_file_without_db_invalidation(path, discard_without_disk_read)
                     .expect("Known in-memory path must be closable");
             }
         }
@@ -1564,6 +1576,7 @@ impl Database {
     fn close_in_memory_file_without_db_invalidation(
         &mut self,
         path: &PathWithScheme,
+        discard_without_disk_read: bool,
     ) -> Result<InvalidationResult, &'static str> {
         if let Some(in_mem) = self.vfs.in_memory_file(path) {
             for separate_file in self
@@ -1579,18 +1592,23 @@ impl Database {
                 }
             }
         }
-        let result = self.vfs.close_in_memory_file(
-            self.project.flags.case_sensitive,
-            path,
-            |file_state, file_index, new_code| {
-                PythonFile::from_file_entry_and_code(
-                    &self.project,
-                    file_index,
-                    file_state.file_entry(),
-                    new_code,
-                )
-            },
-        )?;
+        let result = if discard_without_disk_read {
+            self.vfs
+                .discard_in_memory_file(self.project.flags.case_sensitive, path)?
+        } else {
+            self.vfs.close_in_memory_file(
+                self.project.flags.case_sensitive,
+                path,
+                |file_state, file_index, new_code| {
+                    PythonFile::from_file_entry_and_code(
+                        &self.project,
+                        file_index,
+                        file_state.file_entry(),
+                        new_code,
+                    )
+                },
+            )?
+        };
         if TypeshedSymbols::invalidate_path(self, path.path()) {
             self.typeshed_overlay_index.take();
             self.typeshed_has_overlay = self

@@ -200,6 +200,12 @@ impl Project {
         self.db.close_in_memory_files(paths)
     }
 
+    /// Discards in-memory files known to have no backing files on disk.
+    /// Use `close_in_memory_files` for normal editor buffers so disk contents are restored.
+    pub fn discard_in_memory_files(&mut self, paths: &[PathWithScheme]) {
+        self.db.discard_in_memory_files(paths)
+    }
+
     pub fn diagnostics(&mut self) -> anyhow::Result<Diagnostics<'_>> {
         invalidate_matching_cache();
         if self.db.project.settings.mypy_path.len() > 1 {

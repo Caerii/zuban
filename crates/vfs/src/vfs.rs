@@ -592,19 +592,40 @@ impl<F: VfsFile> Vfs<F> {
                     }
                 }
             } else {
-                match removed {
-                    InMemoryKind::File(file_index) => {
-                        self.invalidate_and_unload_in_memory_file(case_sensitive, file_index)
-                    }
-                    InMemoryKind::Gitignore(gitignore) => {
-                        gitignore.parent.with_entries(self, |entries| {
-                            entries.remove_name(".gitignore");
-                        });
-                        InvalidationResult::InvalidatedFiles
-                    }
-                }
+                self.remove_in_memory_file_without_backing(case_sensitive, removed)
             },
         )
+    }
+
+    /// Removes an in-memory file whose path is known to have no backing file on disk.
+    /// Normal editor buffers must use `close_in_memory_file` to restore disk contents.
+    pub fn discard_in_memory_file(
+        &mut self,
+        case_sensitive: bool,
+        path: &PathWithScheme,
+    ) -> Result<InvalidationResult, &'static str> {
+        let Some(removed) = self.in_memory_files.remove(path) else {
+            return Err("The path is not known to be an in memory file");
+        };
+        Ok(self.remove_in_memory_file_without_backing(case_sensitive, removed))
+    }
+
+    fn remove_in_memory_file_without_backing(
+        &mut self,
+        case_sensitive: bool,
+        removed: InMemoryKind,
+    ) -> InvalidationResult {
+        match removed {
+            InMemoryKind::File(file_index) => {
+                self.invalidate_and_unload_in_memory_file(case_sensitive, file_index)
+            }
+            InMemoryKind::Gitignore(gitignore) => {
+                gitignore.parent.with_entries(self, |entries| {
+                    entries.remove_name(".gitignore");
+                });
+                InvalidationResult::InvalidatedFiles
+            }
+        }
     }
 
     pub fn delete_in_memory_files_directory(
