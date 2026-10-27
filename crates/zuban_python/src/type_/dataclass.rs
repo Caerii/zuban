@@ -1022,13 +1022,9 @@ pub fn ensure_calculated_dataclass(self_: &Arc<Dataclass>, db: &Database) {
         let indent = debug_indent();
         // Cannot use get_or_init, because this might recurse for some reasons (check for
         // example the test testDeferredDataclassInitSignatureSubclass)
-        if self_
-            .inits
-            .set(calculate_init_of_dataclass(db, self_, cls))
-            .is_err()
-        {
-            recoverable_error!("Looped dataclass initialization for {:?}", cls.name());
-        }
+        // Field inference can recursively finish initializing this dataclass first.
+        // Keep that result when this outer calculation completes.
+        let _ = self_.inits.set(calculate_init_of_dataclass(db, self_, cls));
         drop(indent);
         debug!("Finished calculating dataclass {}", cls.name());
     }
