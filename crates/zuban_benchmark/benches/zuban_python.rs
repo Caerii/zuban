@@ -251,6 +251,46 @@ fn bench_warm_multi_lsp_edit(c: &mut Criterion, edit_count: u32) {
     });
 }
 
+fn bench_large_reverse_lsp_edit(c: &mut Criterion) {
+    let (mut project, paths) = prepare_independent_files(1);
+    let path = paths[0].clone();
+    let code = format!("{}#{}\n", "a\n".repeat(256), "x".repeat(100_000));
+    project.store_in_memory_file(path.clone(), code.into_boxed_str());
+    let mut expanded = false;
+    c.bench_function(
+        "256 length-changing reverse LSP edits before 100 KiB tail",
+        |b| {
+            b.iter(|| {
+                let replacement = if expanded { "a" } else { "bb" };
+                let end_column = if expanded { 2 } else { 1 };
+                let changes = (0..256)
+                    .rev()
+                    .map(|line| TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(line, 0),
+                            Position::new(line, end_column),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    })
+                    .collect();
+                project
+                    .store_file_with_lsp_changes(path.clone(), changes, |pos| {
+                        InputPosition::Utf16CodeUnits {
+                            line: pos.line as usize,
+                            column: pos.character as usize,
+                        }
+                    })
+                    .unwrap();
+                expanded = !expanded;
+                let code = project.code_of_in_memory_file(&path).unwrap();
+                assert!(code.starts_with(if expanded { "bb\n" } else { "a\n" }));
+                std::hint::black_box(code);
+            })
+        },
+    );
+}
+
 fn bench_type_checking(c: &mut Criterion) {
     let small_code = utils::dedent(
         r#"
@@ -373,6 +413,7 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_warm_lsp_edit(c);
     bench_warm_multi_lsp_edit(c, 32);
     bench_warm_multi_lsp_edit(c, 256);
+    bench_large_reverse_lsp_edit(c);
 }
 
 // Register the benchmarks

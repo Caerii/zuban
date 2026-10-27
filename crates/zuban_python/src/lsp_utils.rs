@@ -33,6 +33,57 @@ pub(crate) fn apply_document_changes(
         return Ok(text);
     }
 
+    // Small buffers and same-length edits are cheaper to update in place.
+    // For larger, length-changing reverse batches, avoid moving a long suffix
+    // once per edit. The position-width test is conservative for non-ASCII text.
+    if file_contents.len() >= 8192
+        && content_changes.len() > 1
+        && content_changes.iter().any(|change| {
+            change.range.is_some_and(|range| {
+                range.start.line != range.end.line
+                    || change.text.len()
+                        != range.end.character.saturating_sub(range.start.character) as usize
+            })
+        })
+    {
+        let mut edits = Vec::with_capacity(content_changes.len());
+        let mut previous_start = file_contents.len();
+        let mut result_len = file_contents.len();
+        for change in &content_changes {
+            let Some(range) = change.range else {
+                break;
+            };
+            if range.start > range.end {
+                break;
+            }
+            let (Ok(start), Ok(end)) = (
+                line_indices
+                    .line_column_to_safe_byte(file_contents, to_input_position(range.start)),
+                line_indices.line_column_to_safe_byte(file_contents, to_input_position(range.end)),
+            ) else {
+                break;
+            };
+            let (start, end) = (start as usize, end as usize);
+            if start > end || end > previous_start {
+                break;
+            }
+            result_len = result_len - (end - start) + change.text.len();
+            edits.push((start, end, change.text.as_str()));
+            previous_start = start;
+        }
+        if edits.len() == content_changes.len() {
+            let mut text = String::with_capacity(result_len);
+            let mut cursor = 0;
+            for (start, end, replacement) in edits.into_iter().rev() {
+                text.push_str(&file_contents[cursor..start]);
+                text.push_str(replacement);
+                cursor = end;
+            }
+            text.push_str(&file_contents[cursor..]);
+            return Ok(text);
+        }
+    }
+
     // If at least one of the changes is a full document change, use the last
     // of them as the starting point and ignore all previous changes.
     let (mut text, content_changes, has_full_replacement) = match content_changes
@@ -240,6 +291,67 @@ mod tests {
             })
             .unwrap(),
             "First\nSecond\n"
+        );
+    }
+
+    #[test]
+    fn test_reverse_changes_with_multiline_replacement_and_utf16() {
+        let tail = format!("#{}\n", "x".repeat(8192));
+        let code = format!("😀x\nalpha\nbeta\n{tail}");
+        let changes = vec![
+            change(2, 0, 2, 4, "B\nC"),
+            change(1, 0, 1, 5, "A"),
+            change(0, 2, 0, 3, "y"),
+        ];
+        let result = apply_document_changes(&code, &NewlineIndices::new(), changes, |pos| {
+            InputPosition::Utf16CodeUnits {
+                line: pos.line as usize,
+                column: pos.character as usize,
+            }
+        })
+        .unwrap();
+        assert_eq!(result, format!("😀y\nA\nB\nC\n{tail}"));
+    }
+
+    #[test]
+    fn test_reverse_changes_with_same_position_insertions() {
+        let tail = format!("#{}\n", "x".repeat(8192));
+        let code = format!("xy\n{tail}");
+        let changes = vec![change(0, 1, 0, 1, "A"), change(0, 1, 0, 1, "B")];
+        assert_eq!(
+            simplified_apply_document_changes(&code, changes).unwrap(),
+            format!("xBAy\n{tail}")
+        );
+    }
+
+    #[test]
+    fn test_overlapping_changes_remain_sequential() {
+        let changes = vec![change(0, 1, 0, 2, "X"), change(0, 1, 0, 2, "Y")];
+        assert_eq!(
+            simplified_apply_document_changes("abc", changes).unwrap(),
+            "aYc"
+        );
+    }
+
+    #[test]
+    fn test_large_reverse_length_changing_batch() {
+        let tail = format!("#{}\n", "x".repeat(8192));
+        let code = format!("a\nb\n{tail}");
+        let changes = vec![change(1, 0, 1, 1, "bb"), change(0, 0, 0, 1, "aa")];
+        assert_eq!(
+            simplified_apply_document_changes(&code, changes).unwrap(),
+            format!("aa\nbb\n{tail}")
+        );
+    }
+
+    #[test]
+    fn test_large_overlapping_batch_remains_sequential() {
+        let tail = format!("#{}\n", "x".repeat(8192));
+        let code = format!("abc\n{tail}");
+        let changes = vec![change(0, 1, 0, 2, "XX"), change(0, 1, 0, 3, "Y")];
+        assert_eq!(
+            simplified_apply_document_changes(&code, changes).unwrap(),
+            format!("aYc\n{tail}")
         );
     }
 
