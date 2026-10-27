@@ -1073,6 +1073,8 @@ pub(crate) struct Database {
     pub pytest_folder: RwLock<Option<Weak<Directory>>>,
     pub typeshed_overlay_index: OnceLock<Arc<TypeshedSymbols>>,
     pub typeshed_has_overlay: bool,
+    // Only populated by test resource reuse; keeps filesystem discovery local to its base project.
+    test_sys_path_cache: HashMap<Settings, Vec<(WorkspaceKind, Arc<NormalizedPath>)>>,
 }
 
 fn cached_core_stub_tree(code: Box<str>) -> Tree {
@@ -1190,6 +1192,7 @@ impl Database {
             pytest_folder: Default::default(),
             typeshed_overlay_index: Default::default(),
             typeshed_has_overlay,
+            test_sys_path_cache: Default::default(),
         };
 
         this.generate_python_state();
@@ -1230,7 +1233,12 @@ impl Database {
             sys_path: if reuse_sys_path {
                 self.project.sys_path.clone()
             } else {
-                sys_path::create_sys_path(&*self.vfs.handler, &options.settings)
+                self.test_sys_path_cache
+                    .entry(options.settings.clone())
+                    .or_insert_with(|| {
+                        sys_path::create_sys_path(&*self.vfs.handler, &options.settings)
+                    })
+                    .clone()
             },
             settings: options.settings,
             flags: options.flags.finalize(),
@@ -1256,6 +1264,7 @@ impl Database {
             pytest_folder: Default::default(),
             typeshed_overlay_index: Default::default(),
             typeshed_has_overlay,
+            test_sys_path_cache: Default::default(),
         };
 
         for (kind, p1) in &new_db.project.sys_path {
