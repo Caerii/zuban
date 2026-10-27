@@ -10,6 +10,7 @@ use std::{
     borrow::Cow,
     iter::{Skip, StepBy},
     str::from_utf8,
+    sync::Arc,
 };
 
 pub use bytes::parse_python_bytes_literal;
@@ -33,15 +34,16 @@ pub use strings::PythonString;
 pub const NAME_DEF_TO_NAME_DIFFERENCE: u32 = 1;
 
 #[derive(Clone)]
-pub struct Tree(PyTree);
+// Parsed syntax is immutable; cloned files can share the nodes and source text.
+pub struct Tree(Arc<PyTree>);
 
 impl Tree {
     pub fn parse(code: Box<str>) -> Self {
-        Self(parse(code))
+        Self(Arc::new(parse(code)))
     }
 
     pub fn invalid_empty() -> Self {
-        Self(PyTree::empty())
+        Self(Arc::new(PyTree::empty()))
     }
 
     pub fn length(&self) -> usize {
