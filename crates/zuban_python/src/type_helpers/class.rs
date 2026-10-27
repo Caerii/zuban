@@ -1412,6 +1412,11 @@ impl<'db: 'a, 'a> Class<'a> {
                     && let Some(node_ref) = inf.maybe_saved_node_ref(i_s.db)
                     && let Some(func) = node_ref.maybe_function()
                     && let Some(return_annot) = func.return_annotation()
+                    // @no_type_check deliberately leaves the source annotation uncached.
+                    && (node_ref.file.points.get(return_annot.index()).calculated()
+                        || !func.maybe_decorated().is_some_and(|decorated| {
+                            node_ref.file.inference(i_s).is_no_type_check(decorated)
+                        }))
                 {
                     let t = use_cached_return_annotation_type(i_s.db, node_ref.file, return_annot);
                     if !i_s.db.mypy_compatible()
