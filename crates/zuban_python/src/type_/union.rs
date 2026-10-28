@@ -106,7 +106,7 @@ mod equal_atomic_union_tests {
     use vfs::PathWithScheme;
 
     use super::*;
-    use crate::{Project, ProjectOptions, RunCause};
+    use crate::{ProjectOptions, test_project};
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
@@ -119,7 +119,7 @@ mod equal_atomic_union_tests {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
             options.settings.add_global_packages_default = false;
-            let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+            let mut project = test_project::new(options);
             let vfs = project.vfs_handler();
             let path = PathWithScheme::with_file_scheme(
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/union-identity.py")),
