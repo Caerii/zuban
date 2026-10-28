@@ -133,13 +133,13 @@ impl<T, P> IntoIterator for InsertOnlyVec<T, P> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for InsertOnlyVec<T> {
+impl<T: fmt::Debug, P: fmt::Debug> fmt::Debug for InsertOnlyVec<T, P> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         unsafe { &*self.vec.lock().unwrap().get() }.fmt(f)
     }
 }
 
-impl<T: ?Sized> std::ops::Index<usize> for InsertOnlyVec<T> {
+impl<T: ?Sized, P: Deref<Target = T>> std::ops::Index<usize> for InsertOnlyVec<T, P> {
     type Output = T;
 
     fn index(&self, index: usize) -> &T {

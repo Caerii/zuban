@@ -3,7 +3,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     fmt,
-    ops::Range,
+    ops::{Deref, Range},
     sync::{Arc, OnceLock, RwLock},
 };
 
@@ -34,10 +34,29 @@ use crate::{
     utils::SymbolTable,
 };
 
+#[derive(Debug, Clone)]
+enum StoredComplexPoint {
+    Shared(Arc<ComplexPoint>),
+    Owned(Box<ComplexPoint>),
+}
+
+impl Deref for StoredComplexPoint {
+    type Target = ComplexPoint;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Shared(point) => point,
+            Self::Owned(point) => point,
+        }
+    }
+}
+
+type StoredComplexPoints = InsertOnlyVec<ComplexPoint, StoredComplexPoint>;
+
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ComplexValues {
-    binding_prefix: Option<Arc<InsertOnlyVec<ComplexPoint>>>,
-    inferred: InsertOnlyVec<ComplexPoint>,
+    binding_prefix: Option<Arc<StoredComplexPoints>>,
+    inferred: StoredComplexPoints,
 }
 
 impl ComplexValues {
@@ -63,7 +82,14 @@ impl ComplexValues {
             .as_ref()
             .map_or(0, |prefix| prefix.len())
             + self.inferred.len()) as u32;
-        self.inferred.push(Box::pin(complex));
+        let stored = match complex {
+            // A Type is immutable, so replay can share cached instances.
+            complex @ ComplexPoint::TypeInstance(_) => {
+                StoredComplexPoint::Shared(Arc::new(complex))
+            }
+            complex => StoredComplexPoint::Owned(Box::new(complex)),
+        };
+        self.inferred.push(std::pin::Pin::new(stored));
         points.set(
             node_index,
             Point::new_complex_point(complex_index, locality),
@@ -77,7 +103,7 @@ impl ComplexValues {
             .chain(unsafe { self.inferred.iter() })
     }
 
-    fn freeze_binding_prefix(&mut self) -> Option<Arc<InsertOnlyVec<ComplexPoint>>> {
+    fn freeze_binding_prefix(&mut self) -> Option<Arc<StoredComplexPoints>> {
         debug_assert!(self.binding_prefix.is_none());
         if self.inferred.is_empty() {
             return None;
@@ -87,7 +113,7 @@ impl ComplexValues {
         Some(prefix)
     }
 
-    fn from_binding_prefix(prefix: Option<Arc<InsertOnlyVec<ComplexPoint>>>) -> Self {
+    fn from_binding_prefix(prefix: Option<Arc<StoredComplexPoints>>) -> Self {
         Self {
             binding_prefix: prefix,
             inferred: Default::default(),
@@ -182,7 +208,7 @@ struct FlowReuseCandidate {
 struct BindingSnapshot {
     base: Arc<[Point]>,
     changes: Vec<(NodeIndex, Point)>,
-    complex_prefix: Option<Arc<InsertOnlyVec<ComplexPoint>>>,
+    complex_prefix: Option<Arc<StoredComplexPoints>>,
 }
 
 impl BindingSnapshot {
@@ -1534,4 +1560,37 @@ fn add_error_if_typeshed_is_overwritten(file_entry: &FileEntry) -> Option<IssueK
         }
     };
     is_err().then_some(IssueKind::InvalidShadowingOfTypeshedModule { module: "typing" })
+}
+
+#[cfg(test)]
+mod stored_complex_point_tests {
+    use super::*;
+
+    #[test]
+    fn cloned_type_instances_share_storage_but_alias_state_is_independent() {
+        let shared = StoredComplexPoint::Shared(Arc::new(ComplexPoint::TypeInstance(Type::None)));
+        let StoredComplexPoint::Shared(cloned_type) = shared.clone() else {
+            panic!("type instance must use shared storage");
+        };
+        let StoredComplexPoint::Shared(original_type) = shared else {
+            unreachable!();
+        };
+        assert!(Arc::ptr_eq(&original_type, &cloned_type));
+
+        let link = PointLink::new(FileIndex(0), 0);
+        let alias =
+            crate::database::TypeAlias::new(TypeVarLikes::from_vec(Vec::new()), link, link, false);
+        let original =
+            StoredComplexPoint::Owned(Box::new(ComplexPoint::TypeAlias(Box::new(alias))));
+        let cloned = original.clone();
+        let ComplexPoint::TypeAlias(original_alias) = original.deref() else {
+            unreachable!();
+        };
+        let ComplexPoint::TypeAlias(cloned_alias) = cloned.deref() else {
+            unreachable!();
+        };
+        original_alias.set_valid(Type::None, false, false);
+        assert!(!original_alias.calculating());
+        assert!(cloned_alias.calculating());
+    }
 }
