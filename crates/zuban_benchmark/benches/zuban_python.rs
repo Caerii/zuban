@@ -260,13 +260,12 @@ fn bench_same_length_large_lsp_edit(c: &mut Criterion) {
     });
 }
 
-fn bench_length_changing_large_lsp_edit(c: &mut Criterion) {
+fn bench_length_changing_lsp_edit(c: &mut Criterion, name: &str, code: String) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
-    let code = format!("x = 1\n#{}\n", "a".repeat(100_000));
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
     let mut expanded = false;
-    c.bench_function("length-changing LSP edit in 100 KiB file", |b| {
+    c.bench_function(name, |b| {
         b.iter(|| {
             let replacement = if expanded { "x" } else { "yy" };
             let end = if expanded { 2 } else { 1 };
@@ -306,6 +305,29 @@ fn bench_large_lsp_edit_components(c: &mut Criterion) {
             |updated| std::hint::black_box(Tree::parse(updated)),
             BatchSize::SmallInput,
         )
+    });
+    let dense_code = "x = 1\n".repeat(16_000);
+    c.bench_function("parse prepared 16k-line LSP edit", |b| {
+        b.iter_batched(
+            || format!("yy{}", &dense_code[1..]).into_boxed_str(),
+            |updated| std::hint::black_box(Tree::parse(updated)),
+            BatchSize::SmallInput,
+        )
+    });
+    let (mut project, paths) = prepare_independent_files(1);
+    let path = paths[0].clone();
+    let expanded = format!("yy{}", &dense_code[1..]).into_boxed_str();
+    let original = dense_code.into_boxed_str();
+    project.store_in_memory_file(path.clone(), original.clone());
+    let mut use_expanded = false;
+    c.bench_function("store prepared 16k-line file", |b| {
+        b.iter(|| {
+            use_expanded = !use_expanded;
+            project.store_in_memory_file(
+                path.clone(),
+                if use_expanded { &expanded } else { &original }.clone(),
+            );
+        })
     });
 }
 
@@ -581,7 +603,16 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_warm_lsp_edit(c);
     bench_unchanged_lsp_edit(c);
     bench_same_length_large_lsp_edit(c);
-    bench_length_changing_large_lsp_edit(c);
+    bench_length_changing_lsp_edit(
+        c,
+        "length-changing LSP edit in 100 KiB file",
+        format!("x = 1\n#{}\n", "a".repeat(100_000)),
+    );
+    bench_length_changing_lsp_edit(
+        c,
+        "length-changing LSP edit in 16k-line file",
+        "x = 1\n".repeat(16_000),
+    );
     bench_large_lsp_edit_components(c);
     bench_warm_multi_lsp_edit(c, 32);
     bench_warm_multi_lsp_edit(c, 256);

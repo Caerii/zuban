@@ -690,6 +690,29 @@ mod lsp_edit_tests {
     use super::*;
 
     #[test]
+    fn repeated_definitions_form_a_complete_cycle() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/repeated-definitions.py")),
+        );
+        const DEFINITION_COUNT: usize = 1_000;
+        project.store_in_memory_file(path.clone(), "x = 1\n".repeat(DEFINITION_COUNT).into());
+
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let file = project.db.loaded_python_file(index);
+        let first = file.symbol_table.lookup_symbol("x").unwrap();
+        let mut current = first;
+        for definition in 0..DEFINITION_COUNT {
+            current = file.points.get(current).node_index();
+            assert_eq!(current == first, definition + 1 == DEFINITION_COUNT);
+        }
+    }
+
+    #[test]
     fn unchanged_lsp_edit_preserves_invalidation_notification() {
         let notifications = Arc::new(AtomicUsize::new(0));
         let notified = notifications.clone();

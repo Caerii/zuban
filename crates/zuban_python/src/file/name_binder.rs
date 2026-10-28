@@ -2,6 +2,7 @@ use std::{cell::RefCell, cmp::Ordering, sync::Arc};
 
 use config::{FinalizedTypeCheckerFlags, Settings};
 use parsa_python_cst::*;
+use utils::FastHashMap;
 use vfs::FileIndex;
 
 use crate::{
@@ -81,6 +82,7 @@ pub(crate) struct NameBinder<'db> {
     kind: NameBinderKind<'db>,
     scope_node: NodeIndex,
     symbol_table: SymbolTable,
+    definition_tails: FastHashMap<NodeIndex, NodeIndex>,
     unordered_references: Vec<UnorderedReference<'db>>,
     unresolved_nodes: Vec<Unresolved<'db>>,
     names_to_be_resolved_in_parent: Vec<Name<'db>>,
@@ -103,6 +105,7 @@ impl<'db> NameBinder<'db> {
             kind,
             scope_node,
             symbol_table: SymbolTable::default(),
+            definition_tails: FastHashMap::default(),
             unordered_references: vec![],
             unresolved_nodes: vec![],
             names_to_be_resolved_in_parent: vec![],
@@ -348,7 +351,11 @@ impl<'db> NameBinder<'db> {
         in_global_scope: bool,
         cause: IndexingCause,
     ) {
-        let mut latest_name_index = first_index;
+        let mut latest_name_index = self
+            .definition_tails
+            .get(&first_index)
+            .copied()
+            .unwrap_or(first_index);
         let new_index = name_def.name().index();
         loop {
             let point = self.db_infos.points.get(latest_name_index);
@@ -379,6 +386,7 @@ impl<'db> NameBinder<'db> {
                     new_index,
                     Point::new_name_of_name_def(first_index, in_global_scope, Locality::NameBinder),
                 );
+                self.definition_tails.insert(first_index, new_index);
                 break;
             } else {
                 debug_assert_ne!(latest_name_index, next_index);
