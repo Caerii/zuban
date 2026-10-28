@@ -150,8 +150,60 @@ mod flow_context_tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn indexed_entry_position(frame: &Frame, db: &Database, key: &FlowKey) -> Option<usize> {
+        frame.lookup_entry(db, key).map(|found| {
+            frame
+                .entries
+                .iter()
+                .position(|entry| std::ptr::eq(entry, found))
+                .unwrap()
+        })
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn complex_flow_lookup_matches_linear_scan(
+            entries in prop::collection::vec((0u32..32, 0u8..4), 65..130),
+            queries in prop::collection::vec((0u32..32, 0u8..4), 1..32),
+        ) {
+            let mut options = config::ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            let project = crate::Project::without_watcher(options, crate::RunCause::TypeChecking);
+            let mut frame = Frame::new_base_scope();
+            let make_key = |root, index| FlowKey::Index {
+                base_key: Arc::new(FlowKey::Name(PointLink::new(vfs::FileIndex(1), root))),
+                node_index: index as u32,
+                match_index: FlowKeyIndex::Int(index as isize),
+            };
+            for (root, index) in entries {
+                frame.entries.push(Entry {
+                    key: make_key(root, index),
+                    type_: EntryKind::OriginalDeclaration,
+                    modifies_ancestors: true,
+                    deleted: false,
+                    widens: false,
+                });
+            }
+            for (root, index) in queries {
+                let key = make_key(root, index);
+                let expected = frame.entries.iter().position(|entry| entry.key.equals(&project.db, &key));
+                prop_assert_eq!(indexed_entry_position(&frame, &project.db, &key), expected);
+            }
+            let appended = make_key(99, 1);
+            frame.entries.push(Entry {
+                key: appended.clone(),
+                type_: EntryKind::OriginalDeclaration,
+                modifies_ancestors: true,
+                deleted: false,
+                widens: false,
+            });
+            prop_assert_eq!(indexed_entry_position(&frame, &project.db, &appended), Some(frame.entries.len() - 1));
+            frame.entries.retain(|entry| entry.key.root_name().node_index != 99);
+            *frame.initial_name_index.get_mut() = None;
+            prop_assert_eq!(indexed_entry_position(&frame, &project.db, &appended), None);
+        }
+
         #[test]
         fn initial_name_index_matches_linear_scan(actions in prop::collection::vec((0u8..4, 0u32..32), 1..200)) {
             let mut frame = Frame::new_base_scope();
@@ -630,6 +682,24 @@ impl Frame {
     fn lookup_entry(&self, db: &Database, key: &FlowKey) -> Option<&Entry> {
         if let FlowKey::Name(link) = key {
             return self.lookup_name_entry(*link);
+        }
+        if self.entries.len() >= 64 {
+            self.ensure_name_index();
+            let root = key.root_name();
+            let position = self
+                .initial_name_index
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .complex_positions
+                .get(&root)
+                .and_then(|positions| {
+                    positions
+                        .iter()
+                        .copied()
+                        .find(|&position| self.entries[position].key.equals(db, key))
+                });
+            return position.map(|position| &self.entries[position]);
         }
         self.entries.iter().find(|entry| entry.key.equals(db, key))
     }
