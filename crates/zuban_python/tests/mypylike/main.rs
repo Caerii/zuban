@@ -225,7 +225,13 @@ struct TestCase<'name, 'code> {
     code: &'code str,
     from_mypy_test_suite: bool,
     steps: OnceCell<Steps<'code>>,
-    parsed_files: OnceCell<Vec<Vec<(&'code str, Tree)>>>,
+    fixture_data: OnceCell<FixtureData<'code>>,
+}
+
+struct FixtureData<'code> {
+    parsed_files: Vec<Vec<(&'code str, PathWithScheme, Tree)>>,
+    flat_files: Vec<PathWithScheme>,
+    directories: Vec<PathWithScheme>,
 }
 
 #[derive(Default)]
@@ -525,8 +531,9 @@ impl TestCase<'_, '_> {
             return Ok(false);
         }
         let _current_test = CurrentTestGuard::new(&self.name, self.file_name);
-        let parsed_files = self.parsed_files.get_or_init(|| {
-            steps
+        let local_fs = SimpleLocalFS::without_watcher();
+        let fixture_data = self.fixture_data.get_or_init(|| {
+            let parsed_files = steps
                 .iter()
                 .map(|step| {
                     let mut files: Vec<_> = step
@@ -536,14 +543,40 @@ impl TestCase<'_, '_> {
                             !["mypy.ini", "pyproject.toml"].contains(path)
                                 && !path.starts_with("../")
                         })
-                        .map(|(&path, &code)| (path, Tree::parse(code.into())))
+                        .map(|(&path, &code)| {
+                            (
+                                path,
+                                base_path_join(&local_fs, path),
+                                Tree::parse(code.into()),
+                            )
+                        })
                         .collect();
-                    files.sort_by_key(|(path, _)| *path);
+                    files.sort_by_key(|(path, _, _)| *path);
                     files
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let mut flat_files = Vec::new();
+            let mut seen_flat_files = FastHashSet::default();
+            let mut directories = Vec::new();
+            let mut seen_directories = FastHashSet::default();
+            for step in steps {
+                for path in step.files.keys() {
+                    if path.contains('/') {
+                        let before_slash = path.split('/').next().unwrap();
+                        if seen_directories.insert(before_slash) {
+                            directories.push(base_path_join(&local_fs, before_slash));
+                        }
+                    } else if seen_flat_files.insert(*path) {
+                        flat_files.push(base_path_join(&local_fs, path));
+                    }
+                }
+            }
+            FixtureData {
+                parsed_files,
+                flat_files,
+                directories,
+            }
         });
-        let local_fs = SimpleLocalFS::without_watcher();
         let no_typecheck = flags.no_typecheck;
         // Flag-bearing cases with the same effective fixture settings can share the resolved
         // project and diagnostic config. Config files and package directives vary per case.
@@ -592,7 +625,7 @@ impl TestCase<'_, '_> {
         if let Some(start) = setup_start {
             PHASE_TIMINGS.with_borrow_mut(|times| times.setup += start.elapsed());
         }
-        for (i, (step, parsed_files)) in steps.iter().zip(parsed_files).enumerate() {
+        for (i, (step, parsed_files)) in steps.iter().zip(&fixture_data.parsed_files).enumerate() {
             if cfg!(feature = "zuban_debug") {
                 println!(
                     "\nTest: {}: Step {}/{}",
@@ -797,33 +830,15 @@ impl TestCase<'_, '_> {
             }
         }
         let cleanup_start = profile.then(Instant::now);
-        let mut flat_files = Vec::new();
-        let mut seen_flat_files = FastHashSet::default();
-        let mut directories = Vec::new();
-        let mut seen_directories = FastHashSet::default();
-        for step in steps {
-            for path in step.files.keys() {
-                // We need to unload the whole directory, otherwise we might leave up namespace
-                // packages for other tests.
-
-                // Somehow all tests use `/` paths, and I haven't seen backslashes (for Windows)
-                if path.contains('/') {
-                    let before_slash = path.split('/').next().unwrap();
-                    if seen_directories.insert(before_slash) {
-                        directories.push(base_path_join(&local_fs, before_slash));
-                    }
-                } else if seen_flat_files.insert(*path) {
-                    flat_files.push(base_path_join(&local_fs, path));
-                }
-            }
-        }
+        // The fixture paths are fixed across checker modes and run causes. Keep the same
+        // directory cleanup so namespace packages cannot leak into the next case.
         if *FIXTURE_ROOT_HAS_DISK_BACKING.get_or_init(|| Path::new(BASE_PATH_STR).exists()) {
-            project.close_in_memory_files(&flat_files);
+            project.close_in_memory_files(&fixture_data.flat_files);
         } else {
-            project.discard_in_memory_files(&flat_files);
+            project.discard_in_memory_files(&fixture_data.flat_files);
         }
-        for directory in directories {
-            let _ = project.delete_directory_of_in_memory_files(&directory);
+        for directory in &fixture_data.directories {
+            let _ = project.delete_directory_of_in_memory_files(directory);
         }
         if let Some(start) = cleanup_start {
             PHASE_TIMINGS.with_borrow_mut(|times| times.cleanup += start.elapsed());
@@ -885,7 +900,7 @@ fn initialize_and_return_wanted_output(
     local_fs: &SimpleLocalFS,
     project: &mut Project,
     step: &Step,
-    parsed_files: &[(&str, Tree)],
+    parsed_files: &[(&str, PathWithScheme, Tree)],
     from_mypy_test_suite: bool,
 ) -> Vec<String> {
     let profile = profile_phases();
@@ -914,9 +929,9 @@ fn initialize_and_return_wanted_output(
     let mut independent_files = Vec::new();
     let mut inline_duration = Duration::ZERO;
     let mut store_duration = Duration::ZERO;
-    for &(path, ref tree) in parsed_files {
+    for (path, file_path, tree) in parsed_files {
         let code = tree.code();
-        let p = if path == "__main__.py" {
+        let p = if *path == "__main__.py" {
             "__main__"
         } else {
             path
@@ -927,19 +942,18 @@ fn initialize_and_return_wanted_output(
             inline_duration += start.elapsed();
         }
         // testAbstractClassSubclasses
-        let p = base_path_join(local_fs, path);
         if let Some(parent) = maybe_parent(local_fs, code) {
             let store_start = profile.then(Instant::now);
             project
                 .store_in_memory_files_preparsed_for_tests(std::mem::take(&mut independent_files));
             project
-                .store_in_memory_file_with_parent(p, code.into(), &parent)
+                .store_in_memory_file_with_parent(file_path.clone(), code.into(), &parent)
                 .unwrap();
             if let Some(start) = store_start {
                 store_duration += start.elapsed();
             }
         } else {
-            independent_files.push((p, tree.clone()));
+            independent_files.push((file_path.clone(), tree.clone()));
         }
     }
     let store_start = profile.then(Instant::now);
@@ -1483,7 +1497,7 @@ fn mypy_style_cases<'a, 'b>(
             code: &code[start..end],
             from_mypy_test_suite,
             steps: OnceCell::new(),
-            parsed_files: OnceCell::new(),
+            fixture_data: OnceCell::new(),
         });
     };
 
