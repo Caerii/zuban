@@ -37,6 +37,16 @@ pub const NAME_DEF_TO_NAME_DIFFERENCE: u32 = 1;
 // Parsed syntax is immutable; cloned files can share the nodes and source text.
 pub struct Tree(Arc<PyTree>, Arc<OnceLock<Box<[(CodeIndex, CodeIndex)]>>>);
 
+/// Keeps the immutable source bytes backing syntax names alive.
+#[derive(Clone)]
+pub struct SourceOwner(Arc<PyTree>);
+
+impl SourceOwner {
+    pub fn code(&self) -> &str {
+        self.0.as_code()
+    }
+}
+
 impl Tree {
     pub fn parse(code: Box<str>) -> Self {
         Self(Arc::new(parse(code)), Arc::new(OnceLock::new()))
@@ -158,6 +168,10 @@ impl Tree {
 
     pub fn code(&self) -> &str {
         self.0.as_code()
+    }
+
+    pub fn source_owner(&self) -> SourceOwner {
+        SourceOwner(self.0.clone())
     }
 
     pub fn code_matches_input(&self, input: &str) -> bool {

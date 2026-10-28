@@ -626,6 +626,13 @@ fn bench_type_checking(c: &mut Criterion) {
         "same-length LSP edit in 16k-line file",
         "x = 1\n".repeat(16_000),
     );
+    bench_same_length_lsp_edit(
+        c,
+        "same-length LSP edit in 16k-unique-name file",
+        (0..16_000)
+            .map(|index| format!("name_{index} = 1\n"))
+            .collect(),
+    );
     bench_length_changing_lsp_edit(
         c,
         "length-changing LSP edit in 100 KiB file",

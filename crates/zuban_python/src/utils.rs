@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
 };
 
-use parsa_python_cst::{Name, NodeIndex};
+use parsa_python_cst::{Name, NodeIndex, SourceOwner, Tree};
 
 thread_local!(pub(crate) static DEBUG_INDENTATION: Cell<usize> = const { Cell::new(0) });
 
@@ -72,23 +72,24 @@ macro_rules! new_class {
 }
 
 #[derive(Clone)]
-pub(crate) struct HashableRawStr {
+struct HashableRawStr {
     ptr: *const str,
 }
 
 impl HashableRawStr {
-    pub fn new(string: &str) -> Self {
+    fn new(string: &str) -> Self {
         Self { ptr: string }
     }
 
     fn as_str(&self) -> &str {
-        // This is REALLY unsafe. The user of HashableRawStr is responsible for
-        // ensuring that the code part lives longer than this piece.
+        // Stored keys point into SymbolTable::source. Lookup keys borrow their
+        // input only for the duration of HashMap::get.
         unsafe { &*self.ptr }
     }
 }
 
-// The same notes to unsafety apply here
+// The pointed-to source is immutable and owned by the containing SymbolTable.
+// Transient lookup keys are used only within the lookup call.
 unsafe impl Sync for HashableRawStr {}
 unsafe impl Send for HashableRawStr {}
 
@@ -112,27 +113,81 @@ impl fmt::Debug for HashableRawStr {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct SymbolTable {
     // The name symbol table comes from compiler theory, it's basically a mapping of a name to a
     // pointer. To avoid wasting space, we don't use a pointer here, instead we use the node index,
     // which acts as one.
     symbols: HashMap<HashableRawStr, NodeIndex>,
+    // HashableRawStr borrows source bytes. Keep their owner alive even when a
+    // symbol table is cloned or moved independently of its PythonFile.
+    source: SourceOwner,
 }
 
 impl SymbolTable {
+    pub fn new(source: Tree) -> Self {
+        Self {
+            symbols: HashMap::new(),
+            source: source.source_owner(),
+        }
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&str, &NodeIndex)> {
         // This should only ever be called on a table that is not still mutated.
         self.symbols.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn add_or_replace_symbol(&mut self, name: Name) -> Option<NodeIndex> {
+        let stored_name = &self.source.code()[name.start() as usize..name.end() as usize];
+        debug_assert_eq!(name.as_str(), stored_name);
         self.symbols
-            .insert(HashableRawStr::new(name.as_str()), name.index())
+            .insert(HashableRawStr::new(stored_name), name.index())
     }
 
     pub fn lookup_symbol(&self, name: &str) -> Option<NodeIndex> {
         self.symbols.get(&HashableRawStr::new(name)).copied()
+    }
+}
+
+impl fmt::Debug for SymbolTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SymbolTable")
+            .field("symbols", &self.symbols)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod symbol_table_tests {
+    use parsa_python_cst::{AssignmentContent, StmtLikeContent, Target};
+
+    use super::*;
+
+    #[test]
+    fn symbol_keys_keep_their_source_alive() {
+        for (code, symbol) in [("alpha = 1\n", "alpha"), ("π = 1\n", "π")] {
+            let tree = Tree::parse(code.into());
+            let StmtLikeContent::Assignment(assignment) =
+                tree.root().iter_stmt_likes().next().unwrap().node
+            else {
+                panic!("expected an assignment");
+            };
+            let AssignmentContent::Normal(mut targets, _) = assignment.unpack() else {
+                panic!("expected a normal assignment");
+            };
+            let Target::Name(name_def) = targets.next().unwrap() else {
+                panic!("expected a name target");
+            };
+            let index = name_def.name_index();
+            let mut table = SymbolTable::new(tree.clone());
+            table.add_or_replace_symbol(name_def.name());
+            drop(tree);
+
+            let detached = table.clone();
+            drop(table);
+            assert_eq!(detached.source.code(), code);
+            assert_eq!(detached.lookup_symbol(symbol), Some(index));
+        }
     }
 }
 

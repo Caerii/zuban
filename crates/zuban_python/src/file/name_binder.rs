@@ -104,7 +104,7 @@ impl<'db> NameBinder<'db> {
             db_infos,
             kind,
             scope_node,
-            symbol_table: SymbolTable::default(),
+            symbol_table: SymbolTable::new(db_infos.tree.clone()),
             definition_tails: FastHashMap::default(),
             unordered_references: vec![],
             unresolved_nodes: vec![],
@@ -1002,7 +1002,7 @@ impl<'db> NameBinder<'db> {
     }
 
     fn index_self_vars(&mut self, class_index: NodeIndex, class: ClassDef<'db>) -> SymbolTable {
-        let mut symbol_table = SymbolTable::default();
+        let mut symbol_table = SymbolTable::new(self.db_infos.tree.clone());
         for (self_name, name) in class.search_potential_self_assignments() {
             if self.is_self_param(class_index, self_name) {
                 if let Some(index) = symbol_table.lookup_symbol(name.as_code()) {

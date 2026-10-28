@@ -311,8 +311,7 @@ impl Project {
 
     /// This function is mostly for tests and should therefore not be used for something
     /// stable. We would have to ensure first it works everywhere.
-    /// It currently is for example a big issue that HashableRawStr used in the name binder is very
-    /// unsafe and will lead to SEGFAULTS if the original project is not kept.
+    /// Resource reuse across projects needs separate validation before general use.
     pub fn try_to_reuse_project_resources_for_tests(&mut self, options: ProjectOptions) -> Self {
         let db = self.db.try_to_reuse_project_resources_for_tests(options);
         Project { db }
