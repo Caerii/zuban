@@ -228,6 +228,7 @@ fn apply_document_changes<'a>(
 #[cfg(test)]
 mod tests {
     use lsp_types::Range;
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -517,6 +518,56 @@ mod tests {
             simplified_apply_document_changes(&code, changes).unwrap(),
             format!("aa\nbb\n{tail}")
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        #[test]
+        fn reverse_batch_matches_sequential_application(
+            edits in prop::collection::vec(
+                (
+                    prop::sample::select(vec!["a", "bb", "é", "😀x", "abc"]),
+                    prop::sample::select(vec!["", "longer", "Q", "😀", "x\ny"]),
+                ),
+                2..10,
+            ),
+            crlf in any::<bool>(),
+        ) {
+            let newline = if crlf { "\r\n" } else { "\n" };
+            let mut code = String::new();
+            for (source, _) in &edits {
+                code.push_str(source);
+                code.push_str(newline);
+            }
+            code.push('#');
+            code.push_str(&"x".repeat(8192));
+            code.push_str(newline);
+
+            let changes: Vec<_> = edits.iter().enumerate().rev().map(|(line, (source, replacement))| {
+                change(
+                    line as u32,
+                    0,
+                    line as u32,
+                    source.encode_utf16().count() as u32,
+                    replacement,
+                )
+            }).collect();
+            let position = |pos: Position| InputPosition::Utf16CodeUnits {
+                line: pos.line as usize,
+                column: pos.character as usize,
+            };
+            let mut expected = code.clone();
+            for edit in &changes {
+                let range = edit.range.unwrap();
+                let indices = NewlineIndices::new();
+                let start = indices.line_column_to_safe_byte(&expected, position(range.start)).unwrap();
+                let end = indices.line_column_to_safe_byte(&expected, position(range.end)).unwrap();
+                expected.replace_range(start as usize..end as usize, &edit.text);
+            }
+            let actual = apply_document_changes(&code, &NewlineIndices::new(), changes, position)
+                .unwrap();
+            prop_assert_eq!(actual.as_ref(), expected.as_str());
+        }
     }
 
     #[test]
