@@ -432,6 +432,7 @@ fn bench_many_member_conditional_edit(
     count: usize,
     diagnostics: bool,
     read_members: bool,
+    unreachable_else: bool,
 ) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
@@ -451,15 +452,19 @@ fn bench_many_member_conditional_edit(
         ));
     }
     code.push_str("else:\n");
-    for index in 0..count {
-        let rhs = if read_members {
-            format!("box_{index}.value")
-        } else {
-            index.to_string()
-        };
-        code.push_str(&format!(
-            "    box_{index}.value = {index}\n    name_{index} = {rhs}\n"
-        ));
+    if unreachable_else {
+        code.push_str("    raise RuntimeError()\n");
+    } else {
+        for index in 0..count {
+            let rhs = if read_members {
+                format!("box_{index}.value")
+            } else {
+                index.to_string()
+            };
+            code.push_str(&format!(
+                "    box_{index}.value = {index}\n    name_{index} = {rhs}\n"
+            ));
+        }
     }
     let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
     let current = format!("name_{}", count - 1);
@@ -474,6 +479,9 @@ fn bench_many_member_conditional_edit(
     };
     if read_members {
         name.push_str(" with member reads");
+    }
+    if unreachable_else {
+        name.push_str(" and unreachable else");
     }
     c.bench_function(&name, |b| {
         b.iter(|| {
@@ -890,13 +898,15 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_conditional_definitions_edit(c, 2_000, false);
     bench_conditional_definitions_edit(c, 4_000, false);
     bench_conditional_definitions_edit(c, 2_000, true);
-    bench_many_member_conditional_edit(c, 400, false, false);
-    bench_many_member_conditional_edit(c, 400, true, false);
-    bench_many_member_conditional_edit(c, 800, true, false);
-    bench_many_member_conditional_edit(c, 1600, false, false);
-    bench_many_member_conditional_edit(c, 1600, true, false);
-    bench_many_member_conditional_edit(c, 800, true, true);
-    bench_many_member_conditional_edit(c, 1600, true, true);
+    bench_many_member_conditional_edit(c, 400, false, false, false);
+    bench_many_member_conditional_edit(c, 400, true, false, false);
+    bench_many_member_conditional_edit(c, 800, true, false, false);
+    bench_many_member_conditional_edit(c, 1600, false, false, false);
+    bench_many_member_conditional_edit(c, 1600, true, false, false);
+    bench_many_member_conditional_edit(c, 800, true, true, false);
+    bench_many_member_conditional_edit(c, 1600, true, true, false);
+    bench_many_member_conditional_edit(c, 800, true, true, true);
+    bench_many_member_conditional_edit(c, 1600, true, true, true);
     bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,

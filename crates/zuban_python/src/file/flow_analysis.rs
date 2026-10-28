@@ -163,6 +163,7 @@ mod flow_context_tests {
             0 => indexed(),
             1 => member(),
             2 => FlowKey::Member(Arc::new(indexed()), DbString::Static(attr)),
+            4 => name,
             _ => FlowKey::Index {
                 base_key: Arc::new(member()),
                 node_index: node_index as u32,
@@ -367,6 +368,81 @@ mod flow_context_tests {
                             expected
                         );
                     }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn overwriting_frames_matches_linear_child_invalidation_and_merge() {
+        let mut options = config::ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        let project = crate::Project::without_watcher(options, crate::RunCause::TypeChecking);
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(64));
+        let entry = (
+            1u8..4,
+            0u32..24,
+            0u8..4,
+            0u8..5,
+            0u8..8,
+            any::<bool>(),
+            any::<bool>(),
+        );
+        let cases = (
+            prop::collection::vec(entry.clone(), 65..130),
+            prop::collection::vec(entry, 1..32),
+            any::<bool>(),
+        );
+        runner
+            .run(&cases, |(old, incoming, possibly_modify_ancestors)| {
+                let make_entry = |(file, root, index, shape, node_index, deleted, widens)| Entry {
+                    key: test_flow_key(file, root, index, shape, node_index),
+                    type_: EntryKind::OriginalDeclaration,
+                    modifies_ancestors: false,
+                    deleted,
+                    widens,
+                };
+                let mut old: Vec<_> = old.into_iter().map(make_entry).collect();
+                let mut incoming: Vec<_> = incoming.into_iter().map(make_entry).collect();
+                old.push(make_entry((1, 99, 1, 1, 1, false, false)));
+                old.push(make_entry((1, 99, 1, 3, 1, false, false)));
+                incoming.push(make_entry((1, 99, 1, 1, 7, true, true)));
+                let mut expected = old.clone();
+                for entry in &incoming {
+                    expected.retain(|old| !old.key.is_child_of(&project.db, &entry.key));
+                }
+                for mut entry in incoming.iter().cloned() {
+                    if let Some(position) = expected
+                        .iter()
+                        .position(|old| old.key.equals(&project.db, &entry.key))
+                    {
+                        entry.modifies_ancestors |=
+                            expected[position].modifies_ancestors | possibly_modify_ancestors;
+                        entry.widens |= expected[position].widens;
+                        expected[position] = entry;
+                    } else {
+                        expected.push(entry);
+                    }
+                }
+
+                let flow = FlowAnalysis::default();
+                flow.frames
+                    .borrow_mut()
+                    .push(Frame::new(FrameKind::BaseScope, old));
+                flow.overwrite_entries(&project.db, incoming, possibly_modify_ancestors);
+                let frames = flow.frames.borrow();
+                let actual = &frames[0].entries;
+                prop_assert_eq!(actual.len(), expected.len());
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    prop_assert!(same_flow_key_storage(
+                        &project.db,
+                        &actual.key,
+                        &expected.key
+                    ));
+                    prop_assert_eq!(actual.modifies_ancestors, expected.modifies_ancestors);
+                    prop_assert_eq!(actual.deleted, expected.deleted);
+                    prop_assert_eq!(actual.widens, expected.widens);
                 }
                 Ok(())
             })
@@ -878,6 +954,28 @@ impl Frame {
             .position(|entry| entry.key.equals(db, key))
     }
 
+    fn has_child_entry(&self, db: &Database, key: &FlowKey) -> bool {
+        if self.entries.len() < 64 {
+            return self
+                .entries
+                .iter()
+                .any(|entry| entry.key.is_child_of(db, key));
+        }
+        // A descendant is complex and retains the root name of its parent.
+        self.ensure_name_index();
+        self.initial_name_index
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .complex_positions
+            .get(&key.root_name())
+            .is_some_and(|positions| {
+                positions
+                    .iter()
+                    .any(|&position| self.entries[position].key.is_child_of(db, key))
+            })
+    }
+
     fn lookup_entry(&self, db: &Database, key: &FlowKey) -> Option<&Entry> {
         self.lookup_entry_position(db, key)
             .map(|position| &self.entries[position])
@@ -1344,25 +1442,22 @@ impl FlowAnalysis {
             return;
         };
         for entry in &new_entries {
-            let previous_len = tos_frame.entries.len();
-            invalidate_child_entries(&mut tos_frame.entries, db, &entry.key);
-            if tos_frame.entries.len() != previous_len {
+            if tos_frame.has_child_entry(db, &entry.key) {
+                invalidate_child_entries(&mut tos_frame.entries, db, &entry.key);
                 *tos_frame.initial_name_index.get_mut() = None;
             }
         }
 
-        let entries = &mut tos_frame.entries;
-        'outer: for mut new_entry in new_entries {
-            for entry in &mut *entries {
-                if entry.key.equals(db, &new_entry.key) {
-                    new_entry.modifies_ancestors |=
-                        entry.modifies_ancestors | overwritten_entries_possibly_modify_ancestors;
-                    new_entry.widens |= entry.widens;
-                    *entry = new_entry;
-                    continue 'outer;
-                }
+        for mut new_entry in new_entries {
+            if let Some(position) = tos_frame.lookup_entry_position(db, &new_entry.key) {
+                let entry = &mut tos_frame.entries[position];
+                new_entry.modifies_ancestors |=
+                    entry.modifies_ancestors | overwritten_entries_possibly_modify_ancestors;
+                new_entry.widens |= entry.widens;
+                *entry = new_entry;
+            } else {
+                tos_frame.entries.push(new_entry)
             }
-            entries.push(new_entry)
         }
     }
 
