@@ -540,6 +540,7 @@ struct Frame {
 struct NameEntryIndex {
     indexed_len: usize,
     first_positions: HashMap<PointLink, usize>,
+    duplicate_name_positions: HashMap<PointLink, Vec<usize>>,
     complex_positions: HashMap<PointLink, Vec<usize>>,
 }
 
@@ -552,7 +553,15 @@ impl Frame {
         }
         for (position, entry) in self.entries.iter().enumerate().skip(index.indexed_len) {
             if let FlowKey::Name(link) = entry.key {
-                index.first_positions.entry(link).or_insert(position);
+                if index.first_positions.contains_key(&link) {
+                    index
+                        .duplicate_name_positions
+                        .entry(link)
+                        .or_default()
+                        .push(position);
+                } else {
+                    index.first_positions.insert(link, position);
+                }
             } else {
                 index
                     .complex_positions
@@ -5370,32 +5379,107 @@ impl<'file> Inference<'_, 'file, '_> {
             SliceType::new(self.file, primary.index(), getitem).infer(self.i_s);
         }
         FLOW_ANALYSIS.with(|fa| {
+            let mut resolved_root = None;
             for frame in fa.frames.borrow().iter().rev() {
-                for entry in &frame.entries {
-                    if self.matches_primary_entry(primary, &entry.key) {
-                        debug!(
-                            "Use narrowed {} as {}",
-                            primary.as_code(),
-                            entry.debug_format_type(self.i_s.db)
-                        );
-                        return match &entry.type_ {
-                            EntryKind::Type(t) => {
-                                Some((entry.key.clone(), Inferred::from_type(t.clone())))
-                            }
-                            EntryKind::OriginalDeclaration => None,
-                        };
-                    }
+                let indexed_root = if frame.entries.len() >= 64 {
+                    let root = match resolved_root {
+                        Some(root) => root,
+                        None => {
+                            let root = self.primary_root_name_link(primary)?;
+                            resolved_root = Some(root);
+                            root
+                        }
+                    };
+                    Some(root)
+                } else {
+                    None
+                };
+                let matched = if frame.entries.len() >= 64 {
+                    frame.ensure_name_index();
+                    frame
+                        .initial_name_index
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .complex_positions
+                        .get(&indexed_root.unwrap())
+                        .and_then(|positions| {
+                            positions.iter().find_map(|&position| {
+                                let entry = &frame.entries[position];
+                                self.matches_primary_entry(primary, &entry.key)
+                                    .then_some(entry)
+                            })
+                        })
+                } else {
+                    frame
+                        .entries
+                        .iter()
+                        .find(|entry| self.matches_primary_entry(primary, &entry.key))
+                };
+                if let Some(entry) = matched {
+                    debug!(
+                        "Use narrowed {} as {}",
+                        primary.as_code(),
+                        entry.debug_format_type(self.i_s.db)
+                    );
+                    return match &entry.type_ {
+                        EntryKind::Type(t) => {
+                            Some((entry.key.clone(), Inferred::from_type(t.clone())))
+                        }
+                        EntryKind::OriginalDeclaration => None,
+                    };
                 }
                 // If an entry in the current frame overwrites entries further up the stack, it
                 // invalidates any further lookup and we need to return without narrowing.
-                if frame.entries.iter().any(|entry| {
-                    entry.modifies_ancestors && self.matches_ancestor(primary, &entry.key)
-                }) {
+                let invalidates = if frame.entries.len() >= 64 {
+                    let borrowed = frame.initial_name_index.borrow();
+                    let index = borrowed.as_ref().unwrap();
+                    let root = indexed_root.unwrap();
+                    index
+                        .first_positions
+                        .get(&root)
+                        .is_some_and(|&position| frame.entries[position].modifies_ancestors)
+                        || index
+                            .duplicate_name_positions
+                            .get(&root)
+                            .is_some_and(|positions| {
+                                positions
+                                    .iter()
+                                    .any(|&position| frame.entries[position].modifies_ancestors)
+                            })
+                        || index.complex_positions.get(&root).is_some_and(|positions| {
+                            positions.iter().any(|&position| {
+                                let entry = &frame.entries[position];
+                                entry.modifies_ancestors
+                                    && self.matches_ancestor(primary, &entry.key)
+                            })
+                        })
+                } else {
+                    frame.entries.iter().any(|entry| {
+                        entry.modifies_ancestors && self.matches_ancestor(primary, &entry.key)
+                    })
+                };
+                if invalidates {
                     return None;
                 }
             }
             None
         })
+    }
+
+    fn primary_root_name_link(&self, primary: Primary) -> Option<PointLink> {
+        let mut first = primary.first();
+        loop {
+            match first {
+                PrimaryOrAtom::Primary(earlier) => first = earlier.first(),
+                PrimaryOrAtom::Atom(atom) => {
+                    let AtomContent::Name(name) = atom.unpack() else {
+                        return None;
+                    };
+                    return name_def_link(self.i_s.db, self.file, name);
+                }
+            }
+        }
     }
 
     fn matches_ancestor(&self, p: Primary, key: &FlowKey) -> bool {

@@ -2491,3 +2491,85 @@ type NestedDict[T] = dict[str, NestedDict[T] | T]
 def f(data: NestedDict[Any] | None):
     if data is None:
         data = {}
+
+[case many_unrelated_entries_preserve_attribute_narrowing]
+from typing import assert_type
+
+class Box:
+    value: int | str
+
+def f(box: Box) -> None:
+    if isinstance(box.value, int):
+        unrelated_0 = 0
+        unrelated_1 = 1
+        unrelated_2 = 2
+        unrelated_3 = 3
+        unrelated_4 = 4
+        unrelated_5 = 5
+        unrelated_6 = 6
+        unrelated_7 = 7
+        unrelated_8 = 8
+        unrelated_9 = 9
+        unrelated_10 = 10
+        unrelated_11 = 11
+        unrelated_12 = 12
+        unrelated_13 = 13
+        unrelated_14 = 14
+        unrelated_15 = 15
+        unrelated_16 = 16
+        unrelated_17 = 17
+        unrelated_18 = 18
+        unrelated_19 = 19
+        unrelated_20 = 20
+        unrelated_21 = 21
+        unrelated_22 = 22
+        unrelated_23 = 23
+        unrelated_24 = 24
+        unrelated_25 = 25
+        unrelated_26 = 26
+        unrelated_27 = 27
+        unrelated_28 = 28
+        unrelated_29 = 29
+        unrelated_30 = 30
+        unrelated_31 = 31
+        unrelated_32 = 32
+        unrelated_33 = 33
+        unrelated_34 = 34
+        unrelated_35 = 35
+        unrelated_36 = 36
+        unrelated_37 = 37
+        unrelated_38 = 38
+        unrelated_39 = 39
+        unrelated_40 = 40
+        unrelated_41 = 41
+        unrelated_42 = 42
+        unrelated_43 = 43
+        unrelated_44 = 44
+        unrelated_45 = 45
+        unrelated_46 = 46
+        unrelated_47 = 47
+        unrelated_48 = 48
+        unrelated_49 = 49
+        unrelated_50 = 50
+        unrelated_51 = 51
+        unrelated_52 = 52
+        unrelated_53 = 53
+        unrelated_54 = 54
+        unrelated_55 = 55
+        unrelated_56 = 56
+        unrelated_57 = 57
+        unrelated_58 = 58
+        unrelated_59 = 59
+        unrelated_60 = 60
+        unrelated_61 = 61
+        unrelated_62 = 62
+        unrelated_63 = 63
+        unrelated_64 = 64
+        unrelated_65 = 65
+        unrelated_66 = 66
+        unrelated_67 = 67
+        unrelated_68 = 68
+        unrelated_69 = 69
+        assert_type(box.value, int)
+        box = Box()
+        assert_type(box.value, int | str)
