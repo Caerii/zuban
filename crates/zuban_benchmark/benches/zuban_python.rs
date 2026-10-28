@@ -408,7 +408,12 @@ fn bench_dependency_chain_reference_edit(c: &mut Criterion, source_edit: bool) {
     });
 }
 
-fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize, mixed: bool) {
+fn bench_conditional_definitions_edit(
+    c: &mut Criterion,
+    count: usize,
+    mixed: bool,
+    bare_tail: bool,
+) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
     let mut code = if mixed {
@@ -431,14 +436,19 @@ fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize, mixed: bo
     let current = format!("name_{}", count - 1);
     let previous = format!("name_{}", count - 2);
     let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
-    code.push_str(&format!("{current} + 1\n"));
+    if bare_tail {
+        code.push_str(&format!("{current}\n"));
+    } else {
+        code.push_str(&format!("{current} + 1\n"));
+    }
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
     let mut use_previous = false;
     c.bench_function(
         &format!(
-            "reference edit and diagnostics in {}k-name {}conditional",
+            "reference edit and diagnostics in {}k-name {}conditional{}",
             count / 1_000,
             if mixed { "mixed " } else { "" },
+            if bare_tail { " with bare tail" } else { "" },
         ),
         |b| {
             b.iter(|| {
@@ -938,10 +948,11 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_length_changing_reference_lsp_edit(c);
     bench_dependency_chain_reference_edit(c, false);
     bench_dependency_chain_reference_edit(c, true);
-    bench_conditional_definitions_edit(c, 1_000, false);
-    bench_conditional_definitions_edit(c, 2_000, false);
-    bench_conditional_definitions_edit(c, 4_000, false);
-    bench_conditional_definitions_edit(c, 2_000, true);
+    bench_conditional_definitions_edit(c, 1_000, false, false);
+    bench_conditional_definitions_edit(c, 2_000, false, false);
+    bench_conditional_definitions_edit(c, 4_000, false, false);
+    bench_conditional_definitions_edit(c, 2_000, true, false);
+    bench_conditional_definitions_edit(c, 2_000, true, true);
     bench_many_member_conditional_edit(c, 400, false, false, false);
     bench_many_member_conditional_edit(c, 400, true, false, false);
     bench_many_member_conditional_edit(c, 800, true, false, false);

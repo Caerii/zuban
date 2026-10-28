@@ -1117,6 +1117,71 @@ mod lsp_edit_tests {
         );
     }
 
+    #[test]
+    fn branch_defined_reference_reuses_binding_with_class_storage() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/branch-binding-reuse.py")),
+        );
+        let mut code = String::from("class Box:\n    value: int = 0\nguard = bool(1)\nif guard:\n");
+        for index in 0..200 {
+            code.push_str(&format!("    name_{index} = Box()\n"));
+        }
+        code.push_str("else:\n");
+        for index in 0..200 {
+            code.push_str(&format!("    name_{index} = Box()\n"));
+        }
+        let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
+        let current = "name_199";
+        let replacement = "name_198";
+        let start = code.len();
+        code.push_str(current);
+        code.push('\n');
+        project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+        let _ = project.document(&path).unwrap().diagnostics();
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let old_file = project.db.loaded_python_file(index);
+        let old_symbols = old_file.symbol_table.clone();
+        assert!(unsafe { old_file.complex_points.iter().next().is_some() });
+        assert!(
+            old_file
+                .reference_binding_candidate(start, start + current.len(), replacement.len())
+                .is_some()
+        );
+
+        project
+            .store_file_with_lsp_changes(
+                path.clone(),
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(
+                        Position::new(line, 0),
+                        Position::new(line, current.len() as u32),
+                    )),
+                    range_length: None,
+                    text: replacement.into(),
+                }],
+                |pos| InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            )
+            .unwrap();
+        let new_file = project.db.loaded_python_file(index);
+        assert!(Arc::ptr_eq(&old_symbols, &new_file.symbol_table));
+        let mut updated = code;
+        updated.replace_range(start..start + current.len(), replacement);
+        let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+        fresh.store_in_memory_file(path.clone(), updated.into_boxed_str());
+        assert_eq!(
+            format!("{:?}", project.document(&path).unwrap().diagnostics()),
+            format!("{:?}", fresh.document(&path).unwrap().diagnostics()),
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
         #[test]
@@ -1431,9 +1496,10 @@ mod lsp_edit_tests {
 
         #[test]
         fn repeated_conditional_edits_match_fresh_analysis(
-            branch_count in 65usize..90,
+            branch_count in 210usize..240,
             string_else in any::<bool>(),
             omit_last_else in any::<bool>(),
+            bare_tail in any::<bool>(),
             edits in prop::collection::vec((0usize..3, 0usize..4), 2..5),
         ) {
             let mut options = ProjectOptions::default();
@@ -1462,12 +1528,26 @@ mod lsp_edit_tests {
                 }
             }
             let first_reference_line = code.bytes().filter(|&byte| byte == b'\n').count();
+            let first_reference_start = code.len();
             let initial = format!("name_{}", branch_count - 1);
             let mut references = [initial.as_str(); 3];
             for _ in 0..references.len() {
-                code.push_str(&format!("{initial} + box.value\n"));
+                if bare_tail {
+                    code.push_str(&format!("{initial}\n"));
+                } else {
+                    code.push_str(&format!("{initial} + box.value\n"));
+                }
             }
             project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+            if bare_tail {
+                let file_index = project.db.vfs.in_memory_file(&path).unwrap();
+                prop_assert!(project.db.loaded_python_file(file_index)
+                    .reference_binding_candidate(
+                        first_reference_start,
+                        first_reference_start + initial.len(),
+                        initial.len(),
+                    ).is_some());
+            }
             let _ = project.document(&path).unwrap().diagnostics();
             let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
 

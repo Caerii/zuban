@@ -35,11 +35,20 @@ use crate::{
 };
 
 #[derive(Default, Debug, Clone)]
-pub(crate) struct ComplexValues(InsertOnlyVec<ComplexPoint>);
+pub(crate) struct ComplexValues {
+    binding_prefix: Option<Arc<InsertOnlyVec<ComplexPoint>>>,
+    inferred: InsertOnlyVec<ComplexPoint>,
+}
 
 impl ComplexValues {
     pub fn get(&self, index: usize) -> &ComplexPoint {
-        &self.0[index]
+        if let Some(prefix) = &self.binding_prefix {
+            if index < prefix.len() {
+                return &prefix[index];
+            }
+            return &self.inferred[index - prefix.len()];
+        }
+        &self.inferred[index]
     }
 
     pub fn insert(
@@ -49,8 +58,12 @@ impl ComplexValues {
         complex: ComplexPoint,
         locality: Locality,
     ) {
-        let complex_index = self.0.len() as u32;
-        self.0.push(Box::pin(complex));
+        let complex_index = (self
+            .binding_prefix
+            .as_ref()
+            .map_or(0, |prefix| prefix.len())
+            + self.inferred.len()) as u32;
+        self.inferred.push(Box::pin(complex));
         points.set(
             node_index,
             Point::new_complex_point(complex_index, locality),
@@ -58,12 +71,33 @@ impl ComplexValues {
     }
 
     pub unsafe fn iter(&self) -> impl Iterator<Item = &ComplexPoint> {
-        unsafe { self.0.iter() }
+        self.binding_prefix
+            .iter()
+            .flat_map(|prefix| unsafe { prefix.iter() })
+            .chain(unsafe { self.inferred.iter() })
+    }
+
+    fn freeze_binding_prefix(&mut self) -> Option<Arc<InsertOnlyVec<ComplexPoint>>> {
+        debug_assert!(self.binding_prefix.is_none());
+        if self.inferred.is_empty() {
+            return None;
+        }
+        let prefix = Arc::new(std::mem::take(&mut self.inferred));
+        self.binding_prefix = Some(prefix.clone());
+        Some(prefix)
+    }
+
+    fn from_binding_prefix(prefix: Option<Arc<InsertOnlyVec<ComplexPoint>>>) -> Self {
+        Self {
+            binding_prefix: prefix,
+            inferred: Default::default(),
+        }
     }
 
     #[expect(dead_code)]
     pub fn clear(&mut self) {
-        self.0.clear()
+        self.binding_prefix = None;
+        self.inferred.clear()
     }
 }
 
@@ -139,6 +173,7 @@ pub(crate) struct ReferenceBindingCandidate {
 struct BindingSnapshot {
     base: Arc<[Point]>,
     changes: Vec<(NodeIndex, Point)>,
+    complex_prefix: Option<Arc<InsertOnlyVec<ComplexPoint>>>,
 }
 
 impl BindingSnapshot {
@@ -160,6 +195,7 @@ impl BindingSnapshot {
             return Self {
                 base: base.into(),
                 changes: Vec::new(),
+                complex_prefix: self.complex_prefix.clone(),
             };
         }
         let mut changes = self.changes.clone();
@@ -171,17 +207,19 @@ impl BindingSnapshot {
         Self {
             base: self.base.clone(),
             changes,
+            complex_prefix: self.complex_prefix.clone(),
         }
     }
 }
 
-fn single_definition(snapshot: &BindingSnapshot, definition: NodeIndex) -> bool {
-    snapshot.point(definition).is_some_and(|point| {
-        point.calculated()
-            && point.kind() == PointKind::Specific
-            && point.specific() == Specific::FirstNameOfNameDef
-            && point.node_index() == definition
-    })
+fn reusable_definition(snapshot: &BindingSnapshot, definition: NodeIndex) -> Option<Point> {
+    let point = snapshot.point(definition)?;
+    (point.calculated()
+        && point.kind() == PointKind::Specific
+        && point.specific() == Specific::FirstNameOfNameDef
+        && point.in_global_scope()
+        && (point.node_index() == definition || point.needs_flow_analysis()))
+    .then_some(point)
 }
 
 #[derive(Default)]
@@ -361,16 +399,17 @@ impl<'db> PythonFile {
             || self.standalone_module_references.is_empty()
             || self.tree.length() < 4_096
             || self.super_file.is_some()
-            || !self.complex_points.0.is_empty()
             || !self.all_imports.is_empty()
             || !self.star_imports.is_empty()
             || unsafe { self.issues.iter().next().is_some() }
         {
             return;
         }
+        let complex_prefix = self.complex_points.freeze_binding_prefix();
         self.binding_snapshot = Some(Arc::new(BindingSnapshot {
             base: self.points.iter().collect::<Vec<_>>().into(),
             changes: Vec::new(),
+            complex_prefix,
         }));
     }
 
@@ -399,14 +438,13 @@ impl<'db> PythonFile {
         if !point.calculated()
             || point.kind() != PointKind::Redirect
             || point.file_index() != self.file_index
-            || point.needs_flow_analysis()
             || !point.in_global_scope()
         {
             return None;
         }
         let definition = point.node_index();
         if self.tree.node_start_position(definition) as usize >= start
-            || !single_definition(snapshot, definition)
+            || reusable_definition(snapshot, definition).is_none()
         {
             return None;
         }
@@ -444,12 +482,18 @@ impl<'db> PythonFile {
         let Some(definition) = candidate.symbol_table.lookup_symbol(name.as_str()) else {
             return Err(tree);
         };
-        if tree.node_start_position(definition) as usize >= candidate.start
-            || !single_definition(&candidate.snapshot, definition)
-        {
+        let Some(definition_point) = reusable_definition(&candidate.snapshot, definition) else {
+            return Err(tree);
+        };
+        if tree.node_start_position(definition) as usize >= candidate.start {
             return Err(tree);
         }
-        let changed_point = candidate.point.with_changed_node_index(definition);
+        let changed_point = candidate
+            .point
+            .with_changed_node_index(definition)
+            .with_needs_flow_analysis(
+                candidate.point.needs_flow_analysis() || definition_point.needs_flow_analysis(),
+            );
         let points = Points::from_binding_snapshot(candidate.snapshot.base.clone());
         for &(index, point) in &candidate.snapshot.changes {
             points.set(index, point);
@@ -468,7 +512,9 @@ impl<'db> PythonFile {
             standalone_module_references: candidate.standalone_module_references,
             maybe_dunder_all: OnceLock::default(),
             points,
-            complex_points: Default::default(),
+            complex_points: ComplexValues::from_binding_prefix(
+                candidate.snapshot.complex_prefix.clone(),
+            ),
             star_imports: Default::default(),
             all_imports: Default::default(),
             issues: Default::default(),
