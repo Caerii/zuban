@@ -5,14 +5,22 @@ use lsp_types::{Position, TextDocumentContentChangeEvent};
 
 use crate::{InputPosition, lines::NewlineIndices};
 
-pub(crate) fn apply_document_changes<'a>(
+pub(crate) struct AppliedDocumentChanges<'a> {
+    pub code: Cow<'a, str>,
+    pub reuse_line_indices: bool,
+}
+
+pub(crate) fn apply_document_changes_with_metadata<'a>(
     file_contents: &'a str,
     line_indices: &NewlineIndices,
     mut content_changes: Vec<TextDocumentContentChangeEvent>,
     to_input_position: impl Fn(Position) -> InputPosition,
-) -> anyhow::Result<Cow<'a, str>> {
+) -> anyhow::Result<AppliedDocumentChanges<'a>> {
     if content_changes.is_empty() {
-        return Ok(Cow::Borrowed(file_contents));
+        return Ok(AppliedDocumentChanges {
+            code: Cow::Borrowed(file_contents),
+            reuse_line_indices: true,
+        });
     }
     // A single incremental edit can construct the new document in one pass.
     // Copying the old text and then replacing a range moves its suffix twice.
@@ -29,14 +37,26 @@ pub(crate) fn apply_document_changes<'a>(
             .line_column_to_safe_byte(file_contents, to_input_position(range.end))?
             as usize;
         if file_contents[start..end] == change.text {
-            return Ok(Cow::Borrowed(file_contents));
+            return Ok(AppliedDocumentChanges {
+                code: Cow::Borrowed(file_contents),
+                reuse_line_indices: true,
+            });
         }
+        // With equal byte lengths and no newline in either span, all line starts stay put.
+        let reuse_line_indices = end - start == change.text.len()
+            && !file_contents[start..end]
+                .bytes()
+                .chain(change.text.bytes())
+                .any(|byte| byte == b'\n' || byte == b'\r');
         let mut text =
             String::with_capacity(file_contents.len() - (end - start) + change.text.len());
         text.push_str(&file_contents[..start]);
         text.push_str(&change.text);
         text.push_str(&file_contents[end..]);
-        return Ok(Cow::Owned(text));
+        return Ok(AppliedDocumentChanges {
+            code: Cow::Owned(text),
+            reuse_line_indices,
+        });
     }
 
     // Small buffers and same-length edits are cheaper to update in place.
@@ -86,7 +106,10 @@ pub(crate) fn apply_document_changes<'a>(
                 cursor = end;
             }
             text.push_str(&file_contents[cursor..]);
-            return Ok(Cow::Owned(text));
+            return Ok(AppliedDocumentChanges {
+                code: Cow::Owned(text),
+                reuse_line_indices: false,
+            });
         }
     }
 
@@ -104,9 +127,15 @@ pub(crate) fn apply_document_changes<'a>(
     };
     if content_changes.is_empty() {
         return if text == file_contents {
-            Ok(Cow::Borrowed(file_contents))
+            Ok(AppliedDocumentChanges {
+                code: Cow::Borrowed(file_contents),
+                reuse_line_indices: true,
+            })
         } else {
-            Ok(Cow::Owned(text))
+            Ok(AppliedDocumentChanges {
+                code: Cow::Owned(text),
+                reuse_line_indices: false,
+            })
         };
     }
 
@@ -137,7 +166,26 @@ pub(crate) fn apply_document_changes<'a>(
             text.replace_range(start as usize..end as usize, &change.text);
         }
     }
-    Ok(Cow::Owned(text))
+    Ok(AppliedDocumentChanges {
+        code: Cow::Owned(text),
+        reuse_line_indices: false,
+    })
+}
+
+#[cfg(test)]
+fn apply_document_changes<'a>(
+    file_contents: &'a str,
+    line_indices: &NewlineIndices,
+    content_changes: Vec<TextDocumentContentChangeEvent>,
+    to_input_position: impl Fn(Position) -> InputPosition,
+) -> anyhow::Result<Cow<'a, str>> {
+    apply_document_changes_with_metadata(
+        file_contents,
+        line_indices,
+        content_changes,
+        to_input_position,
+    )
+    .map(|applied| applied.code)
 }
 
 #[cfg(test)]
@@ -218,6 +266,27 @@ mod tests {
             apply(vec![change(1, 0, 1, 6, "changed")]),
             Cow::Owned(_)
         ));
+    }
+
+    #[test]
+    fn test_line_index_reuse_only_when_newline_offsets_are_preserved() {
+        let code = "x = 1\nsecond\n";
+        let apply = |change| {
+            apply_document_changes_with_metadata(
+                code,
+                &NewlineIndices::new(),
+                vec![change],
+                |pos| InputPosition::CodePoints {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            )
+            .unwrap()
+        };
+        assert!(apply(change(0, 0, 0, 1, "y")).reuse_line_indices);
+        assert!(!apply(change(0, 0, 0, 1, "longer")).reuse_line_indices);
+        assert!(!apply(change(0, 0, 0, 1, "\n")).reuse_line_indices);
+        assert!(!apply(change(0, 0, 1, 0, "y = 1\n")).reuse_line_indices);
     }
 
     #[test]

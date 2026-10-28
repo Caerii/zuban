@@ -151,16 +151,26 @@ impl Project {
         };
         let file = self.db.loaded_python_file(index);
         let old_code = file.tree.code();
-        let code = lsp_utils::apply_document_changes(
+        let applied = lsp_utils::apply_document_changes_with_metadata(
             old_code,
             &file.newline_indices,
             content_changes,
             to_input_position,
         )?;
-        match code {
+        match applied.code {
             std::borrow::Cow::Owned(code) => {
+                let reused_line_indices = applied
+                    .reuse_line_indices
+                    .then(|| file.newline_indices.clone());
                 self.db
-                    .store_in_memory_file(path, code.into(), file.super_file.map(|s| s.file))
+                    .store_in_memory_file(path, code.into(), file.super_file.map(|s| s.file));
+                if let Some(line_indices) = reused_line_indices {
+                    self.db
+                        .vfs
+                        .file_mut(index)
+                        .expect("updated in-memory file must remain loaded")
+                        .newline_indices = line_indices;
+                }
             }
             std::borrow::Cow::Borrowed(_) => {
                 self.db
@@ -647,7 +657,7 @@ pub struct PanicRecovery {
 }
 
 #[cfg(test)]
-mod lsp_noop_tests {
+mod lsp_edit_tests {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -690,5 +700,43 @@ mod lsp_noop_tests {
             .unwrap();
         assert_eq!(project.code_of_in_memory_file(&path), Some("x = 1\n"));
         assert_eq!(notifications.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn same_length_edit_keeps_later_utf16_positions_correct() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/lsp-lines-test.py")),
+        );
+        project.store_in_memory_file(path.clone(), "x = 1\nemoji = '😀'\n".into());
+        let replace = |project: &mut Project, line, start, end, text: &str| {
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(line, start),
+                            Position::new(line, end),
+                        )),
+                        range_length: None,
+                        text: text.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+        };
+        replace(&mut project, 0, 0, 1, "y");
+        replace(&mut project, 1, 9, 11, "z");
+        assert_eq!(
+            project.code_of_in_memory_file(&path),
+            Some("y = 1\nemoji = 'z'\n")
+        );
     }
 }
