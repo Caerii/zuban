@@ -226,6 +226,7 @@ struct TestCase<'name, 'code> {
     from_mypy_test_suite: bool,
     steps: OnceCell<Steps<'code>>,
     fixture_data: OnceCell<FixtureData<'code>>,
+    parsed_flags: OnceCell<PerTestFlags>,
 }
 
 struct FixtureData<'code> {
@@ -499,8 +500,12 @@ impl TestCase<'_, '_> {
         let flags_key: Vec<String> = steps.flags.iter().map(|flag| (*flag).to_owned()).collect();
         let flags = if flags_key.is_empty() {
             PerTestFlags::default()
+        } else if let Some(parsed) = self.parsed_flags.get() {
+            // The fixture flags are independent of the project run cause. Clone because
+            // initialize_flags may change the per-run CLI options.
+            parsed.clone()
         } else {
-            if let Some(cached) = projects.flags_cache.get(&flags_key) {
+            let parsed = if let Some(cached) = projects.flags_cache.get(&flags_key) {
                 cached.clone()
             } else {
                 // Reuse the Command, then cache the parsed value for identical fixture flags.
@@ -512,7 +517,9 @@ impl TestCase<'_, '_> {
                     .flags_cache
                     .insert(flags_key.clone(), parsed.clone());
                 parsed
-            }
+            };
+            let _ = self.parsed_flags.set(parsed.clone());
+            parsed
         };
         let steps = &steps.steps;
         if flags.only_language_server && !matches!(projects.run_cause, RunCause::LanguageServer)
@@ -1498,6 +1505,7 @@ fn mypy_style_cases<'a, 'b>(
             from_mypy_test_suite,
             steps: OnceCell::new(),
             fixture_data: OnceCell::new(),
+            parsed_flags: OnceCell::new(),
         });
     };
 
