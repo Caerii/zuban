@@ -1309,7 +1309,28 @@ pub(crate) struct Database {
     pub typeshed_overlay_index: OnceLock<Arc<TypeshedSymbols>>,
     pub typeshed_has_overlay: bool,
     // Only populated by test resource reuse; keeps filesystem discovery local to its base project.
-    test_sys_path_cache: HashMap<Settings, Vec<(WorkspaceKind, Arc<NormalizedPath>)>>,
+    test_sys_path_cache: HashMap<TestSysPathKey, Vec<(WorkspaceKind, Arc<NormalizedPath>)>>,
+}
+
+// sys_path::create_sys_path reads only these settings. Other checker settings must not
+// force another filesystem discovery when constructing an isolated test project.
+#[derive(Hash, PartialEq, Eq)]
+struct TestSysPathKey {
+    python_version: Option<config::PythonVersion>,
+    environment: Option<Arc<NormalizedPath>>,
+    prepended_site_packages: Vec<Arc<NormalizedPath>>,
+    add_global_packages_default: bool,
+}
+
+impl From<&Settings> for TestSysPathKey {
+    fn from(settings: &Settings) -> Self {
+        Self {
+            python_version: settings.python_version,
+            environment: settings.environment.clone(),
+            prepended_site_packages: settings.prepended_site_packages.clone(),
+            add_global_packages_default: settings.add_global_packages_default,
+        }
+    }
 }
 
 fn cached_core_stub_tree(code: Box<str>) -> Tree {
@@ -1478,7 +1499,7 @@ impl Database {
                 self.project.sys_path.clone()
             } else {
                 self.test_sys_path_cache
-                    .entry(options.settings.clone())
+                    .entry(TestSysPathKey::from(&options.settings))
                     .or_insert_with(|| {
                         sys_path::create_sys_path(&*self.vfs.handler, &options.settings)
                     })
