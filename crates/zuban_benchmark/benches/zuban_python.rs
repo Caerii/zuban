@@ -427,8 +427,7 @@ fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize, mixed: bo
     );
 }
 
-fn bench_many_member_conditional_edit(c: &mut Criterion, diagnostics: bool) {
-    let count = 400;
+fn bench_many_member_conditional_edit(c: &mut Criterion, count: usize, diagnostics: bool) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
     let mut code = String::from("class Box:\n    value: int = 0\n");
@@ -448,22 +447,27 @@ fn bench_many_member_conditional_edit(c: &mut Criterion, diagnostics: bool) {
         ));
     }
     let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
-    code.push_str("name_399 + 1\n");
+    let current = format!("name_{}", count - 1);
+    let previous = format!("name_{}", count - 2);
+    code.push_str(&format!("{current} + 1\n"));
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
     let mut use_previous = false;
     let name = if diagnostics {
-        "reference edit and diagnostics in 400-name 400-member conditional"
+        format!("reference edit and diagnostics in {count}-name {count}-member conditional")
     } else {
-        "reference edit only in 400-name 400-member conditional"
+        format!("reference edit only in {count}-name {count}-member conditional")
     };
-    c.bench_function(name, |b| {
+    c.bench_function(&name, |b| {
         b.iter(|| {
-            let replacement = if use_previous { "name_399" } else { "name_398" };
+            let replacement = if use_previous { &current } else { &previous };
             project
                 .store_file_with_lsp_changes(
                     path.clone(),
                     vec![TextDocumentContentChangeEvent {
-                        range: Some(Range::new(Position::new(line, 0), Position::new(line, 8))),
+                        range: Some(Range::new(
+                            Position::new(line, 0),
+                            Position::new(line, current.len() as u32),
+                        )),
                         range_length: None,
                         text: replacement.into(),
                     }],
@@ -868,8 +872,9 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_conditional_definitions_edit(c, 2_000, false);
     bench_conditional_definitions_edit(c, 4_000, false);
     bench_conditional_definitions_edit(c, 2_000, true);
-    bench_many_member_conditional_edit(c, false);
-    bench_many_member_conditional_edit(c, true);
+    bench_many_member_conditional_edit(c, 400, false);
+    bench_many_member_conditional_edit(c, 400, true);
+    bench_many_member_conditional_edit(c, 800, true);
     bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,

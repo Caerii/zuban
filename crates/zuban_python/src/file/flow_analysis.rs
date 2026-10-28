@@ -181,12 +181,12 @@ mod flow_context_tests {
                         expected.push(name);
                     }
                     2 => {
-                        frame.initial_name_index = None;
+                        *frame.initial_name_index.get_mut() = None;
                         frame.entries.retain(|entry| !matches!(entry.key, FlowKey::Name(link) if link == name));
                         expected.retain(|link| *link != name);
                     }
                     _ if !expected.is_empty() => {
-                        frame.initial_name_index = None;
+                        *frame.initial_name_index.get_mut() = None;
                         frame.entries.last_mut().unwrap().key = FlowKey::Name(name);
                         *expected.last_mut().unwrap() = name;
                     }
@@ -197,6 +197,14 @@ mod flow_context_tests {
                     _ => unreachable!(),
                 }).collect();
                 prop_assert_eq!(actual, expected.clone());
+                for query_index in [index, 100 + index % 80] {
+                    let query = PointLink::new(vfs::FileIndex(1), query_index);
+                    let actual_position = frame.lookup_name_entry(query).map(|found| {
+                        frame.entries.iter().position(|entry| std::ptr::eq(entry, found)).unwrap()
+                    });
+                    let expected_position = expected.iter().position(|link| *link == query);
+                    prop_assert_eq!(actual_position, expected_position);
+                }
             }
         }
     }
@@ -436,7 +444,7 @@ struct Frame {
     entries: Entries,
     // Built on demand for larger frames. Other entry updates may append to
     // entries, so the indexed length is kept alongside the map.
-    initial_name_index: Option<NameEntryIndex>,
+    initial_name_index: RefCell<Option<NameEntryIndex>>,
     unreachable: bool,
     reported_unreachable: bool,
     kind: FrameKind,
@@ -450,10 +458,9 @@ struct NameEntryIndex {
 }
 
 impl Frame {
-    fn ensure_name_index(&mut self) -> &mut NameEntryIndex {
-        let index = self
-            .initial_name_index
-            .get_or_insert_with(NameEntryIndex::default);
+    fn ensure_name_index(&self) {
+        let mut borrowed = self.initial_name_index.borrow_mut();
+        let index = borrowed.get_or_insert_with(NameEntryIndex::default);
         if index.indexed_len > self.entries.len() {
             *index = NameEntryIndex::default();
         }
@@ -469,12 +476,11 @@ impl Frame {
             }
         }
         index.indexed_len = self.entries.len();
-        index
     }
 
     fn insert_initial_name_if_absent(&mut self, name: PointLink) -> bool {
         if self.entries.len() < 64 {
-            self.initial_name_index = None;
+            *self.initial_name_index.get_mut() = None;
             if self
                 .entries
                 .iter()
@@ -491,7 +497,15 @@ impl Frame {
             });
             return true;
         }
-        if self.ensure_name_index().first_positions.contains_key(&name) {
+        self.ensure_name_index();
+        if self
+            .initial_name_index
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .first_positions
+            .contains_key(&name)
+        {
             return false;
         }
         let position = self.entries.len();
@@ -502,7 +516,7 @@ impl Frame {
             deleted: false,
             widens: false,
         });
-        let index = self.initial_name_index.as_mut().unwrap();
+        let index = self.initial_name_index.get_mut().as_mut().unwrap();
         index.first_positions.insert(name, position);
         index.indexed_len += 1;
         true
@@ -512,7 +526,7 @@ impl Frame {
         Self {
             kind,
             entries,
-            initial_name_index: None,
+            initial_name_index: RefCell::new(None),
             unreachable: false,
             reported_unreachable: false,
         }
@@ -521,7 +535,7 @@ impl Frame {
     fn new_conditional() -> Self {
         Self {
             entries: Default::default(),
-            initial_name_index: None,
+            initial_name_index: RefCell::new(None),
             unreachable: false,
             reported_unreachable: false,
             kind: FrameKind::Conditional,
@@ -531,7 +545,7 @@ impl Frame {
     fn new_base_scope() -> Self {
         Self {
             entries: Default::default(),
-            initial_name_index: None,
+            initial_name_index: RefCell::new(None),
             unreachable: false,
             reported_unreachable: false,
             kind: FrameKind::BaseScope,
@@ -541,7 +555,7 @@ impl Frame {
     fn new_unreachable() -> Self {
         Self {
             entries: Default::default(),
-            initial_name_index: None,
+            initial_name_index: RefCell::new(None),
             unreachable: true,
             reported_unreachable: false,
             kind: FrameKind::Conditional,
@@ -551,7 +565,7 @@ impl Frame {
     fn take(&mut self) -> Self {
         Self {
             entries: std::mem::take(&mut self.entries),
-            initial_name_index: self.initial_name_index.take(),
+            initial_name_index: RefCell::new(self.initial_name_index.take()),
             unreachable: std::mem::take(&mut self.unreachable),
             reported_unreachable: std::mem::take(&mut self.reported_unreachable),
             kind: self.kind,
@@ -594,7 +608,29 @@ impl Frame {
         }
     }
 
+    fn lookup_name_entry(&self, link: PointLink) -> Option<&Entry> {
+        if self.entries.len() < 64 {
+            return self
+                .entries
+                .iter()
+                .find(|entry| matches!(entry.key, FlowKey::Name(name) if name == link));
+        }
+        self.ensure_name_index();
+        let position = self
+            .initial_name_index
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .first_positions
+            .get(&link)
+            .copied();
+        position.map(|position| &self.entries[position])
+    }
+
     fn lookup_entry(&self, db: &Database, key: &FlowKey) -> Option<&Entry> {
+        if let FlowKey::Name(link) = key {
+            return self.lookup_name_entry(*link);
+        }
         self.entries.iter().find(|entry| entry.key.equals(db, key))
     }
 
@@ -896,9 +932,15 @@ impl FlowAnalysis {
         {
             let link = *link;
             tos_frame.ensure_name_index();
-            let index = tos_frame.initial_name_index.as_ref().unwrap();
-            if !index.complex_positions.contains_key(&link) {
-                let existing = index.first_positions.get(&link).copied();
+            let (has_children, existing) = {
+                let borrowed = tos_frame.initial_name_index.borrow();
+                let index = borrowed.as_ref().unwrap();
+                (
+                    index.complex_positions.contains_key(&link),
+                    index.first_positions.get(&link).copied(),
+                )
+            };
+            if !has_children {
                 if let Some(position) = existing {
                     let entry = &mut tos_frame.entries[position];
                     if self.accumulating_types.get() > 0 {
@@ -910,7 +952,7 @@ impl FlowAnalysis {
                 } else {
                     let position = tos_frame.entries.len();
                     tos_frame.entries.push(new_entry);
-                    let index = tos_frame.initial_name_index.as_mut().unwrap();
+                    let index = tos_frame.initial_name_index.get_mut().as_mut().unwrap();
                     index.first_positions.insert(link, position);
                     index.indexed_len += 1;
                 }
@@ -920,19 +962,16 @@ impl FlowAnalysis {
         if !matches!(new_entry.key, FlowKey::Name(_)) && tos_frame.entries.len() >= 64 {
             let root = new_entry.key.root_name();
             tos_frame.ensure_name_index();
-            let candidates = tos_frame
-                .initial_name_index
-                .as_ref()
-                .unwrap()
-                .complex_positions
-                .get(&root);
-            if candidates.is_none_or(|positions| {
-                positions.iter().all(|&position| {
-                    !tos_frame.entries[position]
-                        .key
-                        .is_child_of(i_s.db, &new_entry.key)
-                })
-            }) {
+            let (has_children, existing) = {
+                let borrowed = tos_frame.initial_name_index.borrow();
+                let candidates = borrowed.as_ref().unwrap().complex_positions.get(&root);
+                let has_children = candidates.is_some_and(|positions| {
+                    positions.iter().any(|&position| {
+                        tos_frame.entries[position]
+                            .key
+                            .is_child_of(i_s.db, &new_entry.key)
+                    })
+                });
                 let existing = candidates.and_then(|positions| {
                     positions.iter().copied().find(|&position| {
                         tos_frame.entries[position]
@@ -940,6 +979,9 @@ impl FlowAnalysis {
                             .equals(i_s.db, &new_entry.key)
                     })
                 });
+                (has_children, existing)
+            };
+            if !has_children {
                 if let Some(position) = existing {
                     let entry = &mut tos_frame.entries[position];
                     if self.accumulating_types.get() > 0 {
@@ -951,7 +993,7 @@ impl FlowAnalysis {
                 } else {
                     let position = tos_frame.entries.len();
                     tos_frame.entries.push(new_entry);
-                    let index = tos_frame.initial_name_index.as_mut().unwrap();
+                    let index = tos_frame.initial_name_index.get_mut().as_mut().unwrap();
                     index
                         .complex_positions
                         .entry(root)
@@ -965,7 +1007,7 @@ impl FlowAnalysis {
         let previous_len = tos_frame.entries.len();
         invalidate_child_entries(&mut tos_frame.entries, i_s.db, &new_entry.key);
         if tos_frame.entries.len() != previous_len {
-            tos_frame.initial_name_index = None;
+            *tos_frame.initial_name_index.get_mut() = None;
         }
         let entries = &mut tos_frame.entries;
         for entry in &mut *entries {
@@ -1045,7 +1087,7 @@ impl FlowAnalysis {
     fn remove_key(&self, i_s: &InferenceState, key: &FlowKey) {
         // We don't have to remove anything if nothing is narrowed.
         if let Some(tos_frame) = self.frames.borrow_mut().last_mut() {
-            tos_frame.initial_name_index = None;
+            *tos_frame.initial_name_index.get_mut() = None;
             tos_frame
                 .entries
                 .retain(|entry| !entry.key.equals(i_s.db, key))
@@ -1057,7 +1099,7 @@ impl FlowAnalysis {
             recoverable_error!("Expected a tos to remove {key:?}");
             return;
         };
-        tos.initial_name_index = None;
+        *tos.initial_name_index.get_mut() = None;
         tos.entries
             .retain(|entry| !entry.modifies_ancestors || !entry.key.equals(i_s.db, key))
     }
@@ -1076,7 +1118,7 @@ impl FlowAnalysis {
             let previous_len = tos_frame.entries.len();
             invalidate_child_entries(&mut tos_frame.entries, db, &entry.key);
             if tos_frame.entries.len() != previous_len {
-                tos_frame.initial_name_index = None;
+                *tos_frame.initial_name_index.get_mut() = None;
             }
         }
 
