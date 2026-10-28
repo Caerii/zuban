@@ -875,6 +875,8 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_many_member_conditional_edit(c, 400, false);
     bench_many_member_conditional_edit(c, 400, true);
     bench_many_member_conditional_edit(c, 800, true);
+    bench_many_member_conditional_edit(c, 1600, false);
+    bench_many_member_conditional_edit(c, 1600, true);
     bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,

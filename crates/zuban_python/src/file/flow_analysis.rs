@@ -5343,6 +5343,11 @@ impl<'file> Inference<'_, 'file, '_> {
     }
 
     fn maybe_has_primary_entry(&self, primary: Primary) -> Option<(FlowKey, Inferred)> {
+        // Calls cannot be represented by FlowKey, so no frame entry can narrow
+        // the result of an execution. Avoid scanning every entry for each call.
+        if matches!(primary.second(), PrimaryContent::Execution(_)) {
+            return None;
+        }
         if let PrimaryContent::GetItem(getitem) = primary.second() {
             if !matches!(getitem, parsa_python_cst::SliceType::NamedExpression(_)) {
                 return None;
