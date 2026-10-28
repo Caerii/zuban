@@ -160,50 +160,65 @@ mod flow_context_tests {
         })
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
-        #[test]
-        fn complex_flow_lookup_matches_linear_scan(
-            entries in prop::collection::vec((0u32..32, 0u8..4), 65..130),
-            queries in prop::collection::vec((0u32..32, 0u8..4), 1..32),
-        ) {
-            let mut options = config::ProjectOptions::default();
-            options.settings.typeshed_path = Some(test_utils::typeshed_path());
-            let project = crate::Project::without_watcher(options, crate::RunCause::TypeChecking);
-            let mut frame = Frame::new_base_scope();
-            let make_key = |root, index| FlowKey::Index {
-                base_key: Arc::new(FlowKey::Name(PointLink::new(vfs::FileIndex(1), root))),
-                node_index: index as u32,
-                match_index: FlowKeyIndex::Int(index as isize),
-            };
-            for (root, index) in entries {
+    #[test]
+    fn complex_flow_lookup_matches_linear_scan() {
+        let mut options = config::ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        let project = crate::Project::without_watcher(options, crate::RunCause::TypeChecking);
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(64));
+        let cases = (
+            prop::collection::vec((0u32..32, 0u8..4), 65..130),
+            prop::collection::vec((0u32..32, 0u8..4), 1..32),
+        );
+        runner
+            .run(&cases, |(entries, queries)| {
+                let mut frame = Frame::new_base_scope();
+                let make_key = |root, index| FlowKey::Index {
+                    base_key: Arc::new(FlowKey::Name(PointLink::new(vfs::FileIndex(1), root))),
+                    node_index: index as u32,
+                    match_index: FlowKeyIndex::Int(index as isize),
+                };
+                for (root, index) in entries {
+                    frame.entries.push(Entry {
+                        key: make_key(root, index),
+                        type_: EntryKind::OriginalDeclaration,
+                        modifies_ancestors: true,
+                        deleted: false,
+                        widens: false,
+                    });
+                }
+                for (root, index) in queries {
+                    let key = make_key(root, index);
+                    let expected = frame
+                        .entries
+                        .iter()
+                        .position(|entry| entry.key.equals(&project.db, &key));
+                    prop_assert_eq!(indexed_entry_position(&frame, &project.db, &key), expected);
+                }
+                let appended = make_key(99, 1);
                 frame.entries.push(Entry {
-                    key: make_key(root, index),
+                    key: appended.clone(),
                     type_: EntryKind::OriginalDeclaration,
                     modifies_ancestors: true,
                     deleted: false,
                     widens: false,
                 });
-            }
-            for (root, index) in queries {
-                let key = make_key(root, index);
-                let expected = frame.entries.iter().position(|entry| entry.key.equals(&project.db, &key));
-                prop_assert_eq!(indexed_entry_position(&frame, &project.db, &key), expected);
-            }
-            let appended = make_key(99, 1);
-            frame.entries.push(Entry {
-                key: appended.clone(),
-                type_: EntryKind::OriginalDeclaration,
-                modifies_ancestors: true,
-                deleted: false,
-                widens: false,
-            });
-            prop_assert_eq!(indexed_entry_position(&frame, &project.db, &appended), Some(frame.entries.len() - 1));
-            frame.entries.retain(|entry| entry.key.root_name().node_index != 99);
-            *frame.initial_name_index.get_mut() = None;
-            prop_assert_eq!(indexed_entry_position(&frame, &project.db, &appended), None);
-        }
+                prop_assert_eq!(
+                    indexed_entry_position(&frame, &project.db, &appended),
+                    Some(frame.entries.len() - 1)
+                );
+                frame
+                    .entries
+                    .retain(|entry| entry.key.root_name().node_index != 99);
+                *frame.initial_name_index.get_mut() = None;
+                prop_assert_eq!(indexed_entry_position(&frame, &project.db, &appended), None);
+                Ok(())
+            })
+            .unwrap();
+    }
 
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
         #[test]
         fn initial_name_index_matches_linear_scan(actions in prop::collection::vec((0u8..4, 0u32..32), 1..200)) {
             let mut frame = Frame::new_base_scope();
@@ -251,9 +266,7 @@ mod flow_context_tests {
                 prop_assert_eq!(actual, expected.clone());
                 for query_index in [index, 100 + index % 80] {
                     let query = PointLink::new(vfs::FileIndex(1), query_index);
-                    let actual_position = frame.lookup_name_entry(query).map(|found| {
-                        frame.entries.iter().position(|entry| std::ptr::eq(entry, found)).unwrap()
-                    });
+                    let actual_position = frame.lookup_name_entry_position(query);
                     let expected_position = expected.iter().position(|link| *link == query);
                     prop_assert_eq!(actual_position, expected_position);
                 }
@@ -660,33 +673,31 @@ impl Frame {
         }
     }
 
-    fn lookup_name_entry(&self, link: PointLink) -> Option<&Entry> {
+    fn lookup_name_entry_position(&self, link: PointLink) -> Option<usize> {
         if self.entries.len() < 64 {
             return self
                 .entries
                 .iter()
-                .find(|entry| matches!(entry.key, FlowKey::Name(name) if name == link));
+                .position(|entry| matches!(entry.key, FlowKey::Name(name) if name == link));
         }
         self.ensure_name_index();
-        let position = self
-            .initial_name_index
+        self.initial_name_index
             .borrow()
             .as_ref()
             .unwrap()
             .first_positions
             .get(&link)
-            .copied();
-        position.map(|position| &self.entries[position])
+            .copied()
     }
 
-    fn lookup_entry(&self, db: &Database, key: &FlowKey) -> Option<&Entry> {
+    fn lookup_entry_position(&self, db: &Database, key: &FlowKey) -> Option<usize> {
         if let FlowKey::Name(link) = key {
-            return self.lookup_name_entry(*link);
+            return self.lookup_name_entry_position(*link);
         }
         if self.entries.len() >= 64 {
             self.ensure_name_index();
             let root = key.root_name();
-            let position = self
+            return self
                 .initial_name_index
                 .borrow()
                 .as_ref()
@@ -699,9 +710,15 @@ impl Frame {
                         .copied()
                         .find(|&position| self.entries[position].key.equals(db, key))
                 });
-            return position.map(|position| &self.entries[position]);
         }
-        self.entries.iter().find(|entry| entry.key.equals(db, key))
+        self.entries
+            .iter()
+            .position(|entry| entry.key.equals(db, key))
+    }
+
+    fn lookup_entry(&self, db: &Database, key: &FlowKey) -> Option<&Entry> {
+        self.lookup_entry_position(db, key)
+            .map(|position| &self.entries[position])
     }
 
     fn from_type(key: FlowKey, type_: Type) -> Self {
@@ -920,29 +937,9 @@ impl FlowAnalysis {
         first_frame: &mut Frame,
         other_frame: &mut Frame,
     ) {
-        let other_names: HashMap<PointLink, usize> = if other_frame.entries.len() >= 64 {
-            let mut names = HashMap::with_capacity(other_frame.entries.len());
-            for (index, entry) in other_frame.entries.iter().enumerate() {
-                if let FlowKey::Name(link) = entry.key {
-                    names.entry(link).or_insert(index);
-                }
-            }
-            names
-        } else {
-            HashMap::new()
-        };
         'outer: for first_entry in &first_frame.entries {
             if first_entry.modifies_ancestors {
-                let matched_index = if let FlowKey::Name(link) = first_entry.key
-                    && !other_names.is_empty()
-                {
-                    other_names.get(&link).copied()
-                } else {
-                    other_frame
-                        .entries
-                        .iter()
-                        .position(|entry| first_entry.key.equals(i_s.db, &entry.key))
-                };
+                let matched_index = other_frame.lookup_entry_position(i_s.db, &first_entry.key);
                 if let Some(index) = matched_index {
                     let other_entry = &mut other_frame.entries[index];
                     if other_entry.modifies_ancestors {
@@ -1136,12 +1133,12 @@ impl FlowAnalysis {
     ) -> Entry {
         // We have to use a separate way of borrowing frames and create a union, because that might
         // need mutable access to frames again.
-        let found = self.frames.borrow().iter().rev().find_map(|frame| {
-            frame
-                .entries
-                .iter()
-                .find_map(|e| e.key.equals(i_s.db, &search_for.key).then(|| e.clone()))
-        });
+        let found = self
+            .frames
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|frame| frame.lookup_entry(i_s.db, &search_for.key).cloned());
         if let Some(mut found) = found {
             found.union(i_s, search_for, false);
             found
