@@ -5724,6 +5724,44 @@ mod last_stmt_tests {
                 tree.root().iter_stmt_likes().last().map(signature),
             );
         }
+
+        #[test]
+        fn last_statement_matches_forward_iteration_after_mixed_syntax(
+            fragments in prop::collection::vec(
+                prop::sample::select(vec![
+                    "value = 1\n",
+                    "value; other; final\n",
+                    "value; other;\n",
+                    "if value:\n    other\n",
+                    "if value:\n    other\nelse:\n    final\n",
+                    "def f():\n    return value\n",
+                    "class C:\n    pass\n",
+                    "try:\n    value\nexcept Exception:\n    other\n",
+                    "# comment\n",
+                    "\n",
+                    "value +\n",
+                    "if value:\n",
+                    "@decorator\n",
+                    "    indented\n",
+                ]),
+                0..20,
+            ),
+            ending in prop::sample::select(vec![
+                "", "final\n", "final; other\n", "final;\n", "# tail\n",
+                "\n", "if final:\n    other\n", "final +\n",
+            ]),
+        ) {
+            let mut code = fragments.concat();
+            code.push_str(ending);
+            let tree = Tree::parse(code.into_boxed_str());
+            let signature = |item: StmtLikeIteratorItem<'_>| {
+                (item.parent_index, format!("{:?}", item.node))
+            };
+            prop_assert_eq!(
+                tree.last_stmt_like().map(signature),
+                tree.root().iter_stmt_likes().last().map(signature),
+            );
+        }
     }
 }
 
