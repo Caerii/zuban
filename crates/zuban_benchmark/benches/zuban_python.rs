@@ -306,7 +306,7 @@ fn bench_large_lsp_edit_components(c: &mut Criterion) {
         )
     });
     let tree = Tree::parse(code.clone().into_boxed_str());
-    c.bench_function("scan mypy directives in 100 KiB file", |b| {
+    c.bench_function("read cached mypy directives in 100 KiB file", |b| {
         b.iter(|| std::hint::black_box(tree.mypy_inline_config_directives().count()))
     });
     c.bench_function("check initial type ignore in 100 KiB file", |b| {

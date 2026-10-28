@@ -10,7 +10,7 @@ use std::{
     borrow::Cow,
     iter::{Skip, StepBy},
     str::from_utf8,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 pub use bytes::parse_python_bytes_literal;
@@ -35,11 +35,11 @@ pub const NAME_DEF_TO_NAME_DIFFERENCE: u32 = 1;
 
 #[derive(Clone)]
 // Parsed syntax is immutable; cloned files can share the nodes and source text.
-pub struct Tree(Arc<PyTree>);
+pub struct Tree(Arc<PyTree>, Arc<OnceLock<Box<[(CodeIndex, CodeIndex)]>>>);
 
 impl Tree {
     pub fn parse(code: Box<str>) -> Self {
-        Self(Arc::new(parse(code)))
+        Self(Arc::new(parse(code)), Arc::new(OnceLock::new()))
     }
 
     pub fn can_reuse_syntax_for_name_edit(
@@ -142,13 +142,14 @@ impl Tree {
         debug_assert_eq!(self.code().get(end..), code.get(end..));
         // SAFETY: the caller guarantees unchanged surrounding source; the
         // checks above preserve the token width and grammar category.
-        Ok(Self(Arc::new(unsafe {
-            self.0.rebind_code_unchecked(code)
-        })))
+        Ok(Self(
+            Arc::new(unsafe { self.0.rebind_code_unchecked(code) }),
+            self.1.clone(),
+        ))
     }
 
     pub fn invalid_empty() -> Self {
-        Self(Arc::new(PyTree::empty()))
+        Self(Arc::new(PyTree::empty()), Arc::new(OnceLock::new()))
     }
 
     pub fn length(&self) -> usize {
@@ -291,16 +292,23 @@ impl Tree {
     pub fn mypy_inline_config_directives(&self) -> impl Iterator<Item = (CodeIndex, &str)> {
         const PREFIX: &str = "# mypy: ";
         let code = self.code();
-        memchr::memmem::find_iter(code.as_bytes(), PREFIX.as_bytes()).filter_map(move |start| {
-            if start != 0 && code.as_bytes()[start - 1] != b'\n' {
-                return None;
-            }
-            let rest_start = start + PREFIX.len();
-            let rest_end = code[rest_start..]
-                .find('\n')
-                .map_or(code.len(), |offset| rest_start + offset);
-            Some((rest_start as CodeIndex, &code[rest_start..rest_end]))
-        })
+        let ranges = self.1.get_or_init(|| {
+            memchr::memmem::find_iter(code.as_bytes(), PREFIX.as_bytes())
+                .filter_map(|start| {
+                    if start != 0 && code.as_bytes()[start - 1] != b'\n' {
+                        return None;
+                    }
+                    let rest_start = start + PREFIX.len();
+                    let rest_end = code[rest_start..]
+                        .find('\n')
+                        .map_or(code.len(), |offset| rest_start + offset);
+                    Some((rest_start as CodeIndex, rest_end as CodeIndex))
+                })
+                .collect()
+        });
+        ranges
+            .iter()
+            .map(move |&(start, end)| (start, &code[start as usize..end as usize]))
     }
 
     pub fn debug_info(&self, index: NodeIndex) -> String {
@@ -5695,6 +5703,28 @@ mod directive_tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn same_width_name_edit_shares_directive_ranges() {
+        let original = "name = 1\n# mypy: ignore_errors = True\n";
+        let edited = "node = 1\n# mypy: ignore_errors = True\n";
+        for initialize_before_edit in [false, true] {
+            let tree = Tree::parse(original.into());
+            if initialize_before_edit {
+                assert_eq!(tree.mypy_inline_config_directives().count(), 1);
+            }
+            let rebound = tree
+                .with_same_length_name_edit(0, 4, edited.into())
+                .unwrap();
+            assert!(Arc::ptr_eq(&tree.1, &rebound.1));
+            let actual = rebound.mypy_inline_config_directives().collect::<Vec<_>>();
+            let fresh = Tree::parse(edited.into());
+            assert_eq!(
+                actual,
+                fresh.mypy_inline_config_directives().collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

@@ -748,6 +748,39 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn same_length_name_edit_preserves_inline_directive_semantics() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/inline-directive-edit.py")),
+        );
+        project.store_in_memory_file(
+            path.clone(),
+            "# mypy: ignore_errors = True\nfoo: int = 'bad'\n".into(),
+        );
+        assert!(project.document(&path).unwrap().diagnostics().is_empty());
+
+        project
+            .store_file_with_lsp_changes(
+                path.clone(),
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(Position::new(1, 0), Position::new(1, 3))),
+                    range_length: None,
+                    text: "bar".into(),
+                }],
+                |pos| InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            )
+            .unwrap();
+        assert!(project.document(&path).unwrap().diagnostics().is_empty());
+    }
+
+    #[test]
     fn repeated_definitions_form_a_complete_cycle() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());
