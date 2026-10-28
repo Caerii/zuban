@@ -167,35 +167,56 @@ mod flow_context_tests {
         let project = crate::Project::without_watcher(options, crate::RunCause::TypeChecking);
         let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(64));
         let cases = (
-            prop::collection::vec((0u32..32, 0u8..4), 65..130),
-            prop::collection::vec((0u32..32, 0u8..4), 1..32),
+            prop::collection::vec((0u32..32, 0u8..4, 0u8..4), 65..130),
+            prop::collection::vec((0u32..32, 0u8..4, 0u8..4), 1..32),
         );
         runner
             .run(&cases, |(entries, queries)| {
                 let mut frame = Frame::new_base_scope();
-                let make_key = |root, index| FlowKey::Index {
-                    base_key: Arc::new(FlowKey::Name(PointLink::new(vfs::FileIndex(1), root))),
-                    node_index: index as u32,
-                    match_index: FlowKeyIndex::Int(index as isize),
+                let make_key = |root, index: u8, shape| {
+                    let name = FlowKey::Name(PointLink::new(vfs::FileIndex(1), root));
+                    let attr = ["a", "b", "c", "d"][index as usize];
+                    let member = || FlowKey::Member(Arc::new(name.clone()), DbString::Static(attr));
+                    let indexed = || FlowKey::Index {
+                        base_key: Arc::new(name.clone()),
+                        node_index: index as u32,
+                        match_index: FlowKeyIndex::Int(index as isize),
+                    };
+                    match shape {
+                        0 => indexed(),
+                        1 => member(),
+                        2 => FlowKey::Member(Arc::new(indexed()), DbString::Static(attr)),
+                        _ => FlowKey::Index {
+                            base_key: Arc::new(member()),
+                            node_index: index as u32,
+                            match_index: FlowKeyIndex::Int(index as isize),
+                        },
+                    }
                 };
-                for (root, index) in entries {
+                for (root, index, shape) in entries {
                     frame.entries.push(Entry {
-                        key: make_key(root, index),
+                        key: make_key(root, index, shape),
                         type_: EntryKind::OriginalDeclaration,
                         modifies_ancestors: true,
                         deleted: false,
                         widens: false,
                     });
                 }
-                for (root, index) in queries {
-                    let key = make_key(root, index);
-                    let expected = frame
-                        .entries
-                        .iter()
-                        .position(|entry| entry.key.equals(&project.db, &key));
-                    prop_assert_eq!(indexed_entry_position(&frame, &project.db, &key), expected);
+                for count in [63, 64, 65, frame.entries.len()] {
+                    let prefix = Frame::new(FrameKind::BaseScope, frame.entries[..count].to_vec());
+                    for &(root, index, shape) in &queries {
+                        let key = make_key(root, index, shape);
+                        let expected = prefix
+                            .entries
+                            .iter()
+                            .position(|entry| entry.key.equals(&project.db, &key));
+                        prop_assert_eq!(
+                            indexed_entry_position(&prefix, &project.db, &key),
+                            expected
+                        );
+                    }
                 }
-                let appended = make_key(99, 1);
+                let appended = make_key(99, 1, 3);
                 frame.entries.push(Entry {
                     key: appended.clone(),
                     type_: EntryKind::OriginalDeclaration,
