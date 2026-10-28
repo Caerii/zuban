@@ -1,6 +1,9 @@
 mod testdir;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use regex::Regex;
 
@@ -198,14 +201,20 @@ fn find_flags(string: &str) -> Option<&str> {
 }
 
 pub fn typeshed_path() -> Arc<NormalizedPath> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let typeshed_path = p
-        .ancestors()
-        .nth(2)
-        .unwrap()
-        .join("third_party")
-        .join("typeshed");
-    LocalFS::without_watcher().normalized_path_from_current_dir(typeshed_path.to_str().unwrap())
+    static TYPESHED_PATH: OnceLock<Arc<NormalizedPath>> = OnceLock::new();
+    TYPESHED_PATH
+        .get_or_init(|| {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let typeshed_path = p
+                .ancestors()
+                .nth(2)
+                .unwrap()
+                .join("third_party")
+                .join("typeshed");
+            LocalFS::without_watcher()
+                .normalized_path_from_current_dir(typeshed_path.to_str().unwrap())
+        })
+        .clone()
 }
 
 pub fn write_files_from_fixture(fixture: &str, root_dir_contains_symlink: bool) -> TestDir {
