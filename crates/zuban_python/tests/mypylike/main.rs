@@ -239,6 +239,7 @@ struct PhaseTimings {
     file_store: Duration,
     wanted_normalization: Duration,
     diagnostics: Duration,
+    diagnostic_compute: Duration,
     comparison: Duration,
     cleanup: Duration,
     project_reuse: Duration,
@@ -649,9 +650,12 @@ impl TestCase<'_, '_> {
             let mut diagnostics: Vec<_> = if no_typecheck {
                 vec![]
             } else {
-                project
-                    .diagnostics()
-                    .unwrap()
+                let computed = project.diagnostics().unwrap();
+                if let Some(start) = diagnostics_start {
+                    PHASE_TIMINGS
+                        .with_borrow_mut(|times| times.diagnostic_compute += start.elapsed());
+                }
+                computed
                     .issues
                     .iter()
                     .filter_map(|d| {
@@ -1454,6 +1458,11 @@ fn run(
                 times.inline_errors.as_secs_f64(),
                 times.file_store.as_secs_f64(),
                 times.wanted_normalization.as_secs_f64(),
+            );
+            println!(
+                "Diagnostic compute (s): {:.3} of {:.3} total",
+                times.diagnostic_compute.as_secs_f64(),
+                times.diagnostics.as_secs_f64(),
             );
         });
     }
