@@ -58,12 +58,34 @@ impl Tree {
         end: usize,
         replacement: &str,
     ) -> bool {
+        replacement.len() == end.saturating_sub(start)
+            && self
+                .reusable_name_edit_span(start, end, replacement)
+                .is_some()
+    }
+
+    pub fn can_reuse_syntax_for_name_length_edit(
+        &self,
+        start: usize,
+        end: usize,
+        replacement: &str,
+    ) -> bool {
+        self.reusable_name_edit_span(start, end, replacement)
+            .is_some()
+    }
+
+    fn reusable_name_edit_span(
+        &self,
+        start: usize,
+        end: usize,
+        replacement: &str,
+    ) -> Option<(CodeIndex, CodeIndex)> {
         let old = self.code();
-        if start >= end || end > old.len() || replacement.len() != end - start {
-            return false;
+        if start > end || end > old.len() {
+            return None;
         }
         let Ok(start_index) = start.try_into() else {
-            return false;
+            return None;
         };
         let leaf = self.0.leaf_by_position(start_index);
         let token_start = leaf.start() as usize;
@@ -84,14 +106,14 @@ impl Tree {
                     .is_some_and(u8::is_ascii_digit))
             || matches!(old.as_bytes().get(token_end), Some(b'\'' | b'"'))
         {
-            return false;
+            return None;
         }
         let (Some(old_name), Some(prefix), Some(suffix)) = (
             old.get(token_start..token_end),
             old.get(token_start..start),
             old.get(end..token_end),
         ) else {
-            return false;
+            return None;
         };
         let mut new_name = String::with_capacity(old_name.len());
         new_name.push_str(prefix);
@@ -109,7 +131,7 @@ impl Tree {
                 && !keywords_contain(name)
                 && !matches!(name, "match" | "case" | "type" | "_" | "async" | "await")
         };
-        reusable_name(old_name) && reusable_name(&new_name)
+        (reusable_name(old_name) && reusable_name(&new_name)).then_some((leaf.start(), leaf.end()))
     }
 
     /// Reuse syntax nodes when part or all of one ASCII name token changes
@@ -164,6 +186,71 @@ impl Tree {
             Arc::new(unsafe { self.0.rebind_code_unchecked(code) }),
             self.1.clone(),
         ))
+    }
+
+    /// Reuse syntax after a single ASCII name edit changes its byte width.
+    pub fn with_name_length_edit(
+        &self,
+        start: usize,
+        end: usize,
+        replacement_len: usize,
+        code: Box<str>,
+    ) -> Result<Self, Box<str>> {
+        let Some(new_end) = start.checked_add(replacement_len) else {
+            return Err(code);
+        };
+        if self.code().get(..start) != code.get(..start)
+            || self.code().get(end..) != code.get(new_end..)
+        {
+            return Err(code);
+        }
+        // SAFETY: the prefix and suffix checks prove this is the sole edit.
+        unsafe { self.with_verified_name_length_edit(start, end, replacement_len, code) }
+    }
+
+    /// Rebind an already constructed single-edit buffer after an ASCII name edit.
+    ///
+    /// # Safety
+    /// `code` must equal old[..start] + replacement + old[end..], where the
+    /// replacement occupies `replacement_len` bytes.
+    pub unsafe fn with_verified_name_length_edit(
+        &self,
+        start: usize,
+        end: usize,
+        replacement_len: usize,
+        code: Box<str>,
+    ) -> Result<Self, Box<str>> {
+        let Some(new_end) = start.checked_add(replacement_len) else {
+            return Err(code);
+        };
+        let Some(replacement) = code.get(start..new_end) else {
+            return Err(code);
+        };
+        let Some(expected_len) = self
+            .code()
+            .len()
+            .checked_sub(end.saturating_sub(start))
+            .and_then(|len| len.checked_add(replacement_len))
+        else {
+            return Err(code);
+        };
+        if code.len() != expected_len {
+            return Err(code);
+        }
+        let Some((token_start, token_end)) = self.reusable_name_edit_span(start, end, replacement)
+        else {
+            return Err(code);
+        };
+        debug_assert_eq!(self.code().get(..start), code.get(..start));
+        debug_assert_eq!(self.code().get(end..), code.get(new_end..));
+        // SAFETY: the caller proves the single edit and the checks above prove
+        // the edited token retains its grammar category.
+        let tree = unsafe {
+            self.0
+                .rebind_name_with_shift_unchecked(code, token_start, token_end)?
+        };
+        // Directive byte ranges may move, so the old cache cannot be shared.
+        Ok(Self(Arc::new(tree), Arc::new(OnceLock::new())))
     }
 
     pub fn invalid_empty() -> Self {
@@ -5600,6 +5687,45 @@ mod incremental_name_tests {
                 );
             }
         }
+
+        #[test]
+        fn accepted_length_changing_name_edits_match_fresh_parse(
+            name in "[a-z][a-z0-9_]{1,12}",
+            context in 0u8..7,
+            position in 0usize..16,
+            removed in 0usize..5,
+            replacement in prop::sample::select(vec!["", "a", "xy", "abc", "_2", "for", "case", "'", "é"]),
+        ) {
+            let (prefix, suffix) = match context {
+                0 => ("", " = 1\nother = 2\n"),
+                1 => ("obj.", " = 1\nother = 2\n"),
+                2 => ("def ", "():\n    pass\nother = 2\n"),
+                3 => ("f'{", "}'\nother = 2\n"),
+                4 => ("if ", ":\n    pass\nother = 2\n"),
+                5 => ("from pkg import ", "\nother = 2\n"),
+                _ => ("class ", ":\n    pass\nother = 2\n"),
+            };
+            let old = format!("{prefix}{name}{suffix}");
+            let start = prefix.len() + position % name.len();
+            let end = (start + removed).min(prefix.len() + name.len());
+            prop_assume!(replacement.len() != end - start);
+            let tree = Tree::parse(old.clone().into_boxed_str());
+            prop_assume!(tree.can_reuse_syntax_for_name_length_edit(start, end, replacement));
+            let updated = format!("{}{}{}", &old[..start], replacement, &old[end..]);
+            let reused = tree
+                .with_name_length_edit(start, end, replacement.len(), updated.clone().into_boxed_str())
+                .unwrap();
+            let fresh = Tree::parse(updated.into_boxed_str());
+            prop_assert_eq!(reused.length(), fresh.length());
+            for index in 0..reused.length() as NodeIndex {
+                let left = reused.0.node_by_index(index);
+                let right = fresh.0.node_by_index(index);
+                prop_assert_eq!(
+                    (left.type_(), left.start(), left.end(), left.parent().map(|node| node.index)),
+                    (right.type_(), right.start(), right.end(), right.parent().map(|node| node.index)),
+                );
+            }
+        }
     }
 
     #[test]
@@ -5632,6 +5758,29 @@ mod incremental_name_tests {
                     (b.type_(), b.start(), b.end())
                 );
             }
+        }
+    }
+
+    #[test]
+    fn length_changing_name_edits_reject_grammar_changes() {
+        for (old, start, end, replacement) in [
+            ("x = 1\n", 0, 1, "for"),
+            ("x = 1\n", 0, 1, "case"),
+            ("x = 1\n", 0, 1, ""),
+            ("x = 1\n", 0, 1, "é"),
+            ("x'hi'\n", 0, 1, "fr"),
+            ("1.x\n", 2, 3, "e3"),
+            ("name = 1\n", 0, 4, "valid"),
+        ] {
+            let tree = Tree::parse(old.into());
+            let edited = format!("{}{}{}", &old[..start], replacement, &old[end..]);
+            let accepted =
+                tree.with_name_length_edit(start, end, replacement.len(), edited.into_boxed_str());
+            assert_eq!(
+                accepted.is_ok(),
+                replacement == "valid",
+                "{old:?} -> {replacement:?}"
+            );
         }
     }
 
@@ -5817,6 +5966,21 @@ mod directive_tests {
                 fresh.mypy_inline_config_directives().collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn length_changing_name_edit_rebuilds_directive_ranges() {
+        let original = "x = 1\n# mypy: ignore_errors = True\n";
+        let edited = "long_name = 1\n# mypy: ignore_errors = True\n";
+        let tree = Tree::parse(original.into());
+        assert_eq!(tree.mypy_inline_config_directives().count(), 1);
+        let rebound = tree.with_name_length_edit(0, 1, 9, edited.into()).unwrap();
+        assert!(!Arc::ptr_eq(&tree.1, &rebound.1));
+        let fresh = Tree::parse(edited.into());
+        assert_eq!(
+            rebound.mypy_inline_config_directives().collect::<Vec<_>>(),
+            fresh.mypy_inline_config_directives().collect::<Vec<_>>()
+        );
     }
 
     #[test]

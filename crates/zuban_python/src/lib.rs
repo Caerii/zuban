@@ -161,20 +161,29 @@ impl Project {
             std::borrow::Cow::Owned(code) => {
                 let parent = file.super_file.map(|s| s.file);
                 let code = code.into_boxed_str();
-                let syntax_candidate = applied.same_length_edit.and_then(|(start, end)| {
-                    code.get(start..end)
-                        .filter(|replacement| {
-                            file.tree
-                                .can_reuse_syntax_for_name_edit(start, end, replacement)
-                        })
-                        .map(|_| database::SyntaxReuseCandidate {
-                            tree: file.tree.clone(),
-                            start,
-                            end,
-                            source_address: code.as_ptr() as usize,
-                            reference_binding: file.reference_binding_candidate(start, end),
-                        })
-                });
+                let syntax_candidate =
+                    applied
+                        .single_edit
+                        .and_then(|(start, end, replacement_len)| {
+                            code.get(start..start + replacement_len)
+                                .filter(|replacement| {
+                                    file.tree.can_reuse_syntax_for_name_length_edit(
+                                        start,
+                                        end,
+                                        replacement,
+                                    )
+                                })
+                                .map(|_| database::SyntaxReuseCandidate {
+                                    tree: file.tree.clone(),
+                                    start,
+                                    end,
+                                    replacement_len,
+                                    source_address: code.as_ptr() as usize,
+                                    reference_binding: (replacement_len == end - start)
+                                        .then(|| file.reference_binding_candidate(start, end))
+                                        .flatten(),
+                                })
+                        });
                 let updated_line_indices = match applied.line_index_update {
                     lsp_utils::LineIndexUpdate::Reuse => Some(file.newline_indices.clone()),
                     lsp_utils::LineIndexUpdate::Shift {
@@ -787,6 +796,53 @@ mod lsp_edit_tests {
                 "yame_0"
             };
             assert!(file.lookup_symbol(previous_definition).is_none());
+            assert_eq!(
+                project.document(&path).unwrap().diagnostics().len(),
+                diagnostic_count
+            );
+        }
+    }
+
+    #[test]
+    fn length_changing_name_edit_rebinds_symbols_and_diagnostics() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/length-name-edit.py")),
+        );
+        project.store_in_memory_file(path.clone(), "name = 1\nname\n".into());
+        for (replacement, expected_definition, diagnostic_count) in
+            [("long_name", "long_name", 1), ("name", "name", 0)]
+        {
+            let old_definition = if replacement == "name" {
+                "long_name"
+            } else {
+                "name"
+            };
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(0, 0),
+                            Position::new(0, old_definition.len() as u32),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            let index = project.db.vfs.in_memory_file(&path).unwrap();
+            let file = project.db.loaded_python_file(index);
+            assert!(file.lookup_symbol(expected_definition).is_some());
+            assert!(file.lookup_symbol(old_definition).is_none());
             assert_eq!(
                 project.document(&path).unwrap().diagnostics().len(),
                 diagnostic_count

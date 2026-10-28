@@ -1229,6 +1229,7 @@ pub(crate) struct SyntaxReuseCandidate {
     pub tree: Tree,
     pub start: usize,
     pub end: usize,
+    pub replacement_len: usize,
     pub source_address: usize,
     pub reference_binding: Option<ReferenceBindingCandidate>,
 }
@@ -1677,24 +1678,43 @@ impl Database {
                     // The LSP single-edit path constructs this exact allocation
                     // from the old code and moves it through the VFS unchanged.
                     // A different allocation takes the fully validated path.
+                    let same_length = candidate.replacement_len == candidate.end - candidate.start;
                     let rebound = if new_code.as_ptr() as usize == candidate.source_address {
                         // SAFETY: apply_document_changes_with_metadata builds
                         // old[..start] + replacement + old[end..] in one pass.
                         // The address check confirms the VFS passed that owned
                         // buffer to this callback without replacing it.
                         unsafe {
-                            candidate.tree.with_verified_same_length_name_edit(
+                            if same_length {
+                                candidate.tree.with_verified_same_length_name_edit(
+                                    candidate.start,
+                                    candidate.end,
+                                    new_code,
+                                )
+                            } else {
+                                candidate.tree.with_verified_name_length_edit(
+                                    candidate.start,
+                                    candidate.end,
+                                    candidate.replacement_len,
+                                    new_code,
+                                )
+                            }
+                        }
+                    } else {
+                        if same_length {
+                            candidate.tree.with_same_length_name_edit(
                                 candidate.start,
                                 candidate.end,
                                 new_code,
                             )
+                        } else {
+                            candidate.tree.with_name_length_edit(
+                                candidate.start,
+                                candidate.end,
+                                candidate.replacement_len,
+                                new_code,
+                            )
                         }
-                    } else {
-                        candidate.tree.with_same_length_name_edit(
-                            candidate.start,
-                            candidate.end,
-                            new_code,
-                        )
                     };
                     match rebound {
                         Ok(tree) => {

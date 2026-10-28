@@ -798,6 +798,62 @@ macro_rules! create_grammar {
                 }
             }
 
+            /// Rebind a single name token after its byte width changes while
+            /// preserving the grammar and node order.
+            ///
+            /// # Safety
+            /// The caller must prove that only the name token changed and that
+            /// the new token has the same grammar role.
+            pub unsafe fn rebind_name_with_shift_unchecked(
+                &self,
+                code: Box<str>,
+                token_start: $crate::CodeIndex,
+                token_end: $crate::CodeIndex,
+            ) -> Result<Self, Box<str>> {
+                let Ok(new_length): Result<u32, _> = code.len().try_into() else {
+                    return Err(code);
+                };
+                let Ok(old_length): Result<u32, _> = self.internal_tree.code.len().try_into() else {
+                    return Err(code);
+                };
+                if token_start >= token_end || token_end > old_length {
+                    return Err(code);
+                }
+                let Ok(shift): Result<i32, _> =
+                    (i64::from(new_length) - i64::from(old_length)).try_into()
+                else {
+                    return Err(code);
+                };
+                let mut nodes = Vec::with_capacity(self.internal_tree.nodes.len());
+                for node in self.internal_tree.nodes.iter() {
+                    let mut updated = *node;
+                    let Some(end) = node.start_index.checked_add(node.length) else {
+                        return Err(code);
+                    };
+                    if node.start_index >= token_end {
+                        let Some(start) = node.start_index.checked_add_signed(shift) else {
+                            return Err(code);
+                        };
+                        updated.start_index = start;
+                    } else if node.start_index <= token_start && end >= token_end {
+                        let Some(length) = node.length.checked_add_signed(shift) else {
+                            return Err(code);
+                        };
+                        updated.length = length;
+                    } else if end > token_start {
+                        // A node overlaps only part of the edited token.
+                        return Err(code);
+                    }
+                    nodes.push(updated);
+                }
+                Ok(Self {
+                    internal_tree: $crate::InternalTree {
+                        code,
+                        nodes: std::sync::Arc::new(nodes),
+                    }
+                })
+            }
+
             pub fn as_code(&self) -> &str {
                 &self.internal_tree.code
             }

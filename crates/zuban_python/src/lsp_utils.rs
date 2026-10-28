@@ -8,7 +8,7 @@ use crate::{InputPosition, lines::NewlineIndices};
 pub(crate) struct AppliedDocumentChanges<'a> {
     pub code: Cow<'a, str>,
     pub line_index_update: LineIndexUpdate,
-    pub same_length_edit: Option<(usize, usize)>,
+    pub single_edit: Option<(usize, usize, usize)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -32,7 +32,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
         return Ok(AppliedDocumentChanges {
             code: Cow::Borrowed(file_contents),
             line_index_update: LineIndexUpdate::Reuse,
-            same_length_edit: None,
+            single_edit: None,
         });
     }
     // A single incremental edit can construct the new document in one pass.
@@ -53,7 +53,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
             return Ok(AppliedDocumentChanges {
                 code: Cow::Borrowed(file_contents),
                 line_index_update: LineIndexUpdate::Reuse,
-                same_length_edit: None,
+                single_edit: None,
             });
         }
         let removed_len = end - start;
@@ -88,7 +88,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
         return Ok(AppliedDocumentChanges {
             code: Cow::Owned(text),
             line_index_update,
-            same_length_edit: (removed_len == inserted_len).then_some((start, end)),
+            single_edit: Some((start, end, inserted_len)),
         });
     }
 
@@ -142,7 +142,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
             return Ok(AppliedDocumentChanges {
                 code: Cow::Owned(text),
                 line_index_update: LineIndexUpdate::Rebuild,
-                same_length_edit: None,
+                single_edit: None,
             });
         }
     }
@@ -164,13 +164,13 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
             Ok(AppliedDocumentChanges {
                 code: Cow::Borrowed(file_contents),
                 line_index_update: LineIndexUpdate::Reuse,
-                same_length_edit: None,
+                single_edit: None,
             })
         } else {
             Ok(AppliedDocumentChanges {
                 code: Cow::Owned(text),
                 line_index_update: LineIndexUpdate::Rebuild,
-                same_length_edit: None,
+                single_edit: None,
             })
         };
     }
@@ -205,7 +205,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
     Ok(AppliedDocumentChanges {
         code: Cow::Owned(text),
         line_index_update: LineIndexUpdate::Rebuild,
-        same_length_edit: None,
+        single_edit: None,
     })
 }
 
