@@ -307,6 +307,33 @@ impl Tree {
         File::new(self.0.root_node())
     }
 
+    pub fn last_stmt_like(&self) -> Option<StmtLikeIteratorItem<'_>> {
+        let last_index = self.length().checked_sub(1)? as NodeIndex;
+        let endmarker = self.0.node_by_index(last_index);
+        if !endmarker.is_type(Terminal(TerminalType::Endmarker)) {
+            return self.root().iter_stmt_likes().last();
+        }
+        let last_stmt = endmarker.previous_sibling()?;
+        if !last_stmt.is_type(Nonterminal(stmt)) {
+            return self.root().iter_stmt_likes().last();
+        }
+        let child = last_stmt.nth_child(0);
+        if child.is_type(Nonterminal(simple_stmts)) {
+            let simple = child.iter_children().step_by(2).last()?;
+            if !simple.is_type(Nonterminal(simple_stmt)) {
+                return self.root().iter_stmt_likes().last();
+            }
+            return Some(StmtLikeIteratorItem {
+                parent_index: simple.index,
+                node: StmtLikeContent::from_simple_stmt(simple),
+            });
+        }
+        Some(StmtLikeIteratorItem {
+            parent_index: last_stmt.index,
+            node: StmtLikeContent::from_stmt_child(child),
+        })
+    }
+
     pub fn maybe_star_expressions(&self) -> Option<StarExpressions<'_>> {
         let mut node = self.0.root_node();
         for (nonterminal, expected_node_count) in [
@@ -5664,6 +5691,40 @@ pub enum UnpackedError<'db> {
     CaseBlock(CaseBlock<'db>),
     SimpleStmt(SimpleStmt<'db>),
     NonBlockErrorPart(NonBlockErrorPart<'db>),
+}
+
+#[cfg(test)]
+mod last_stmt_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn last_statement_matches_forward_iteration(count in 0usize..50, ending in 0usize..7) {
+            let mut code = String::new();
+            for index in 0..count {
+                code.push_str(&format!("name_{index} = {index}\n"));
+            }
+            code.push_str(match ending {
+                0 => "",
+                1 => "target\n",
+                2 => "a = 1; target\n",
+                3 => "if True:\n    target\n",
+                4 => "target\n# trailing comment\n",
+                5 => "target +\n",
+                _ => "target\n\n",
+            });
+            let tree = Tree::parse(code.into_boxed_str());
+            let signature = |item: StmtLikeIteratorItem<'_>| {
+                (item.parent_index, format!("{:?}", item.node))
+            };
+            prop_assert_eq!(
+                tree.last_stmt_like().map(signature),
+                tree.root().iter_stmt_likes().last().map(signature),
+            );
+        }
+    }
 }
 
 #[cfg(test)]

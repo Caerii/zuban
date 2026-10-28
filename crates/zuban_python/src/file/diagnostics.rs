@@ -405,10 +405,13 @@ impl Inference<'_, '_, '_> {
         func: Option<&Function>,
         capture_before: Option<NodeIndex>,
     ) {
+        let mut prior_statements_calculated = true;
         for stmt_like in stmts {
             if capture_before == Some(stmt_like.parent_index) {
                 *self.file.tail_flow_snapshot.write().unwrap() = FLOW_ANALYSIS
-                    .with(|flow_analysis| flow_analysis.snapshot_module_frame())
+                    .with(|flow_analysis| {
+                        flow_analysis.snapshot_module_frame(prior_statements_calculated)
+                    })
                     .map(Arc::new);
             }
             let point = self.point(stmt_like.parent_index);
@@ -418,6 +421,7 @@ impl Inference<'_, '_, '_> {
             }
             if self.is_unreachable() {
                 if self.stmt_is_allowed_when_unreachable(stmt_like.node) {
+                    prior_statements_calculated = false;
                     continue;
                 } else {
                     let start = self.file.tree.node_start_position(stmt_like.parent_index);
@@ -440,6 +444,7 @@ impl Inference<'_, '_, '_> {
                                 .inference(avoid_errors_i_s)
                                 .handle_stmt_like(stmt_like, class, func);
                         });
+                        prior_statements_calculated = false;
                         continue;
                     }
                     return;

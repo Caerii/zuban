@@ -819,8 +819,15 @@ struct Frame {
 pub(crate) struct FlowSnapshot {
     entries: Entries,
     initial_name_index: Option<Arc<NameEntryIndex>>,
+    prior_statements_calculated: bool,
     unreachable: bool,
     reported_unreachable: bool,
+}
+
+impl FlowSnapshot {
+    pub(crate) fn prior_statements_calculated(&self) -> bool {
+        self.prior_statements_calculated
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1150,7 +1157,10 @@ pub(crate) struct FlowAnalysis {
 }
 
 impl FlowAnalysis {
-    pub(crate) fn snapshot_module_frame(&self) -> Option<FlowSnapshot> {
+    pub(crate) fn snapshot_module_frame(
+        &self,
+        prior_statements_calculated: bool,
+    ) -> Option<FlowSnapshot> {
         if !self.try_frames.borrow().is_empty()
             || self.loop_details.borrow().is_some()
             || !self.partials_in_module.borrow().is_empty()
@@ -1171,6 +1181,7 @@ impl FlowAnalysis {
         Some(FlowSnapshot {
             entries: frame.entries.clone(),
             initial_name_index: frame.initial_name_index.borrow().clone(),
+            prior_statements_calculated,
             unreachable: frame.unreachable,
             reported_unreachable: frame.reported_unreachable,
         })

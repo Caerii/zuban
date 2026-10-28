@@ -433,7 +433,7 @@ impl fmt::Debug for PythonFile {
 impl<'db> PythonFile {
     pub(super) fn replayable_tail_name_stmt(&self) -> Option<(NodeIndex, Name<'_>)> {
         self.binding_snapshot.as_ref()?;
-        let last = self.tree.root().iter_stmt_likes().last()?;
+        let last = self.tree.last_stmt_like()?;
         let expr = last.node.maybe_simple_expr()?;
         let name = match expr.maybe_unpacked_atom() {
             Some(AtomContent::Name(name)) => name,
@@ -460,16 +460,10 @@ impl<'db> PythonFile {
         if tail_name.index() != name_index || tail_stmt_index > name_index {
             return None;
         }
-        if !self
-            .tree
-            .root()
-            .iter_stmt_likes()
-            .take_while(|stmt| stmt.parent_index != tail_stmt_index)
-            .all(|stmt| self.points.get(stmt.parent_index).calculated())
-        {
+        let snapshot = self.tail_flow_snapshot.read().unwrap().clone()?;
+        if !snapshot.prior_statements_calculated() {
             return None;
         }
-        let snapshot = self.tail_flow_snapshot.read().unwrap().clone()?;
         Some(FlowReuseCandidate {
             points: self.points.clone(),
             complex_points: self.complex_points.clone(),
