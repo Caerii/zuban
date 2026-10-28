@@ -1,7 +1,7 @@
 use std::{
     borrow::{Borrow, Cow},
     cell::{Cell, OnceCell, Ref, RefCell, RefMut},
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     rc::Rc,
     sync::Arc,
 };
@@ -148,6 +148,58 @@ impl FlowAnalysisHelper {
 #[cfg(test)]
 mod flow_context_tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn initial_name_index_matches_linear_scan(actions in prop::collection::vec((0u8..4, 0u32..32), 1..200)) {
+            let mut frame = Frame::new_base_scope();
+            let mut expected = Vec::new();
+            for index in 100..180 {
+                let name = PointLink::new(vfs::FileIndex(1), index);
+                prop_assert!(frame.insert_initial_name_if_absent(name));
+                expected.push(name);
+            }
+            for (action, index) in actions {
+                let name = PointLink::new(vfs::FileIndex(1), index);
+                match action {
+                    0 => {
+                        let was_absent = !expected.contains(&name);
+                        prop_assert_eq!(frame.insert_initial_name_if_absent(name), was_absent);
+                        if was_absent { expected.push(name); }
+                    }
+                    1 => {
+                        // An inferred entry may exist before its declaration is visited.
+                        frame.entries.push(Entry {
+                            key: FlowKey::Name(name),
+                            type_: EntryKind::OriginalDeclaration,
+                            modifies_ancestors: true,
+                            deleted: false,
+                            widens: false,
+                        });
+                        expected.push(name);
+                    }
+                    2 => {
+                        frame.initial_name_index = None;
+                        frame.entries.retain(|entry| !matches!(entry.key, FlowKey::Name(link) if link == name));
+                        expected.retain(|link| *link != name);
+                    }
+                    _ if !expected.is_empty() => {
+                        frame.initial_name_index = None;
+                        frame.entries.last_mut().unwrap().key = FlowKey::Name(name);
+                        *expected.last_mut().unwrap() = name;
+                    }
+                    _ => {}
+                }
+                let actual: Vec<_> = frame.entries.iter().map(|entry| match entry.key {
+                    FlowKey::Name(link) => link,
+                    _ => unreachable!(),
+                }).collect();
+                prop_assert_eq!(actual, expected.clone());
+            }
+        }
+    }
 
     #[test]
     fn nested_flow_context_restores_outer_context_after_panic() {
@@ -372,16 +424,66 @@ enum FrameKind {
 #[derive(Debug, Clone)]
 struct Frame {
     entries: Entries,
+    // Built on demand for larger frames. Other entry updates may
+    // append to entries, so the indexed length is kept alongside the set.
+    initial_name_index: Option<(usize, HashSet<PointLink>)>,
     unreachable: bool,
     reported_unreachable: bool,
     kind: FrameKind,
 }
 
 impl Frame {
+    fn insert_initial_name_if_absent(&mut self, name: PointLink) -> bool {
+        if self.entries.len() < 64 {
+            self.initial_name_index = None;
+            if self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.key, FlowKey::Name(link) if link == name))
+            {
+                return false;
+            }
+            self.entries.push(Entry {
+                key: FlowKey::Name(name),
+                type_: EntryKind::OriginalDeclaration,
+                modifies_ancestors: true,
+                deleted: false,
+                widens: false,
+            });
+            return true;
+        }
+        let (indexed_len, names) = self
+            .initial_name_index
+            .get_or_insert_with(|| (0, HashSet::new()));
+        if *indexed_len > self.entries.len() {
+            names.clear();
+            *indexed_len = 0;
+        }
+        for entry in &self.entries[*indexed_len..] {
+            if let FlowKey::Name(link) = entry.key {
+                names.insert(link);
+            }
+        }
+        *indexed_len = self.entries.len();
+        if !names.insert(name) {
+            return false;
+        }
+        self.entries.push(Entry {
+            key: FlowKey::Name(name),
+            type_: EntryKind::OriginalDeclaration,
+            modifies_ancestors: true,
+            deleted: false,
+            widens: false,
+        });
+        *indexed_len += 1;
+        true
+    }
+
     fn new(kind: FrameKind, entries: Entries) -> Self {
         Self {
             kind,
             entries,
+            initial_name_index: None,
             unreachable: false,
             reported_unreachable: false,
         }
@@ -390,6 +492,7 @@ impl Frame {
     fn new_conditional() -> Self {
         Self {
             entries: Default::default(),
+            initial_name_index: None,
             unreachable: false,
             reported_unreachable: false,
             kind: FrameKind::Conditional,
@@ -399,6 +502,7 @@ impl Frame {
     fn new_base_scope() -> Self {
         Self {
             entries: Default::default(),
+            initial_name_index: None,
             unreachable: false,
             reported_unreachable: false,
             kind: FrameKind::BaseScope,
@@ -408,6 +512,7 @@ impl Frame {
     fn new_unreachable() -> Self {
         Self {
             entries: Default::default(),
+            initial_name_index: None,
             unreachable: true,
             reported_unreachable: false,
             kind: FrameKind::Conditional,
@@ -417,6 +522,7 @@ impl Frame {
     fn take(&mut self) -> Self {
         Self {
             entries: std::mem::take(&mut self.entries),
+            initial_name_index: self.initial_name_index.take(),
             unreachable: std::mem::take(&mut self.unreachable),
             reported_unreachable: std::mem::take(&mut self.reported_unreachable),
             kind: self.kind,
@@ -736,6 +842,7 @@ impl FlowAnalysis {
             return;
         }
         let mut tos_frame = self.tos_frame();
+        tos_frame.initial_name_index = None;
         invalidate_child_entries(&mut tos_frame.entries, i_s.db, &new_entry.key);
         let entries = &mut tos_frame.entries;
         for entry in &mut *entries {
@@ -771,7 +878,6 @@ impl FlowAnalysis {
         }
         drop(borrowed_mut);
         let mut tos_frame = self.tos_frame();
-        let entries = &mut tos_frame.entries;
         if cfg!(debug_assertions) {
             for try_frame in self.try_frames.borrow().iter() {
                 for entry in try_frame.entries.iter() {
@@ -783,14 +889,9 @@ impl FlowAnalysis {
                 }
             }
         }
-        for entry in entries.iter() {
-            if entry.key.equals(db, &new_entry.key) {
-                // Circular imports can infer an assignment before the declaration is
-                // initialized. Keep that inferred entry instead of appending a duplicate.
-                return;
-            }
-        }
-        entries.push(new_entry)
+        // Circular imports can infer an assignment before the declaration is
+        // initialized. Keep that inferred entry instead of appending a duplicate.
+        tos_frame.insert_initial_name_if_absent(name);
     }
 
     fn merge_key_with_ancestor_assignment(
@@ -821,6 +922,7 @@ impl FlowAnalysis {
     fn remove_key(&self, i_s: &InferenceState, key: &FlowKey) {
         // We don't have to remove anything if nothing is narrowed.
         if let Some(tos_frame) = self.frames.borrow_mut().last_mut() {
+            tos_frame.initial_name_index = None;
             tos_frame
                 .entries
                 .retain(|entry| !entry.key.equals(i_s.db, key))
@@ -832,6 +934,7 @@ impl FlowAnalysis {
             recoverable_error!("Expected a tos to remove {key:?}");
             return;
         };
+        tos.initial_name_index = None;
         tos.entries
             .retain(|entry| !entry.modifies_ancestors || !entry.key.equals(i_s.db, key))
     }
@@ -846,6 +949,7 @@ impl FlowAnalysis {
             recoverable_error!("Trying to overwrite entries, but there are no frames");
             return;
         };
+        tos_frame.initial_name_index = None;
 
         for entry in &new_entries {
             invalidate_child_entries(&mut tos_frame.entries, db, &entry.key);
