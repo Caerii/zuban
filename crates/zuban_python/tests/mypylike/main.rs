@@ -1,7 +1,7 @@
 mod ide;
 
 use std::{
-    cell::OnceCell,
+    cell::{OnceCell, RefCell},
     cmp::Ordering,
     collections::BinaryHeap,
     env,
@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     sync::{Arc, Mutex, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use clap::{Command, CommandFactory as _, FromArgMatches as _, Parser};
@@ -224,6 +224,30 @@ struct TestCase<'name, 'code> {
     code: &'code str,
     from_mypy_test_suite: bool,
     steps: OnceCell<Steps<'code>>,
+}
+
+#[derive(Default)]
+struct PhaseTimings {
+    setup: Duration,
+    project_setup: Duration,
+    fixture: Duration,
+    ide: Duration,
+    diagnostics: Duration,
+    comparison: Duration,
+    cleanup: Duration,
+    project_reuse: Duration,
+    project_reuse_count: usize,
+    project_fresh: Duration,
+    project_fresh_count: usize,
+}
+
+thread_local! {
+    static PHASE_TIMINGS: RefCell<PhaseTimings> = RefCell::new(PhaseTimings::default());
+}
+static PROFILE_PHASES: OnceLock<bool> = OnceLock::new();
+
+fn profile_phases() -> bool {
+    *PROFILE_PHASES.get_or_init(|| env::var_os("ZUBAN_PROFILE_TEST_PHASES").is_some())
 }
 
 #[derive(Clone, Copy)]
@@ -448,6 +472,8 @@ impl TestCase<'_, '_> {
     }
 
     fn run(&self, projects: &mut ProjectsCache, mode: Mode) -> anyhow::Result<bool> {
+        let profile = profile_phases();
+        let setup_start = profile.then(Instant::now);
         let steps = self
             .steps
             .get_or_init(|| calculate_steps(Some(self.file_name), self.code));
@@ -509,6 +535,7 @@ impl TestCase<'_, '_> {
         let cached_flag_project = flag_project_key
             .as_ref()
             .and_then(|key| projects.flag_projects.get(key).copied());
+        let project_setup_start = profile.then(Instant::now);
         let (mut project, diagnostic_config) = if let Some(cached) = cached_flag_project {
             (
                 OwnedOrMut::Mut(&mut projects.projects[cached.index]),
@@ -528,12 +555,18 @@ impl TestCase<'_, '_> {
                 flag_project_key,
             )
         };
+        if let Some(start) = project_setup_start {
+            PHASE_TIMINGS.with_borrow_mut(|times| times.project_setup += start.elapsed());
+        }
 
         let is_parse_test = self.file_name.starts_with("parse");
         let is_semanal_test = self.file_name.starts_with("semanal-");
 
         let mut result = Ok(true);
         let project = project.as_mut();
+        if let Some(start) = setup_start {
+            PHASE_TIMINGS.with_borrow_mut(|times| times.setup += start.elapsed());
+        }
         for (i, step) in steps.iter().enumerate() {
             if cfg!(feature = "zuban_debug") {
                 println!(
@@ -543,6 +576,7 @@ impl TestCase<'_, '_> {
                     steps.len()
                 );
             }
+            let fixture_start = profile.then(Instant::now);
             let mut wanted = initialize_and_return_wanted_output(
                 &local_fs,
                 project,
@@ -550,6 +584,7 @@ impl TestCase<'_, '_> {
                 self.from_mypy_test_suite,
             );
             let mut ide_test_results: Vec<String> = vec![];
+            let ide_start = profile.then(Instant::now);
             if !self.from_mypy_test_suite {
                 BASE_PATH.with(|base_path| {
                     let mut previously_checked = FastHashSet::default();
@@ -569,6 +604,9 @@ impl TestCase<'_, '_> {
                     }
                 });
             }
+            if let Some(start) = ide_start {
+                PHASE_TIMINGS.with_borrow_mut(|times| times.ide += start.elapsed());
+            }
 
             for path in &step.deletions {
                 project
@@ -579,6 +617,10 @@ impl TestCase<'_, '_> {
                             .unwrap()
                     });
             }
+            if let Some(start) = fixture_start {
+                PHASE_TIMINGS.with_borrow_mut(|times| times.fixture += start.elapsed());
+            }
+            let diagnostics_start = profile.then(Instant::now);
             let mut diagnostics: Vec<_> = if no_typecheck {
                 vec![]
             } else {
@@ -615,6 +657,10 @@ impl TestCase<'_, '_> {
                     })
                     .collect()
             };
+            if let Some(start) = diagnostics_start {
+                PHASE_TIMINGS.with_borrow_mut(|times| times.diagnostics += start.elapsed());
+            }
+            let comparison_start = profile.then(Instant::now);
             if self.from_mypy_test_suite {
                 // Remove notes that only exist in Zuban
                 diagnostics.retain(|x| !x.contains("note: TypedDicts can only be assigned to"))
@@ -717,7 +763,11 @@ impl TestCase<'_, '_> {
                 ));
                 break;
             }
+            if let Some(start) = comparison_start {
+                PHASE_TIMINGS.with_borrow_mut(|times| times.comparison += start.elapsed());
+            }
         }
+        let cleanup_start = profile.then(Instant::now);
         let mut flat_files = Vec::new();
         let mut seen_flat_files = FastHashSet::default();
         let mut directories = Vec::new();
@@ -745,6 +795,9 @@ impl TestCase<'_, '_> {
         }
         for directory in directories {
             let _ = project.delete_directory_of_in_memory_files(&directory);
+        }
+        if let Some(start) = cleanup_start {
+            PHASE_TIMINGS.with_borrow_mut(|times| times.cleanup += start.elapsed());
         }
         result
     }
@@ -1060,8 +1113,7 @@ fn calculate_filters(args: &[String]) -> Vec<&str> {
 
 struct ProjectsCache {
     command: Command,
-    base_project: Option<Project>,
-    base_version: PythonVersion,
+    base_projects: Option<FastHashMap<BaseProjectKey, Project>>,
     map: FastHashMap<(Settings, TypeCheckerFlags), usize>,
     projects: Vec<Project>,
     common_projects: FastHashMap<String, [Option<CommonProject>; 4]>,
@@ -1069,6 +1121,8 @@ struct ProjectsCache {
     run_cause: RunCause,
     flags_cache: FastHashMap<Vec<String>, PerTestFlags>,
 }
+
+type BaseProjectKey = (Option<PythonVersion>, Option<Arc<NormalizedPath>>);
 
 fn set_mypy_path(options: &mut ProjectOptions) {
     options.settings.add_global_packages_default = false;
@@ -1086,13 +1140,20 @@ fn base_path_join(local_fs: &dyn VfsHandler, other: &str) -> PathWithScheme {
 impl ProjectsCache {
     fn new(reuse_db: bool, run_cause: RunCause) -> Self {
         let mut po = ProjectOptions::mypy_default();
-        let base_version = po.settings.python_version_or_default();
         po.settings.typeshed_path = Some(test_utils::typeshed_path());
         set_mypy_path(&mut po);
+        let base_projects = reuse_db.then(|| {
+            let mut bases = FastHashMap::default();
+            let key = (
+                po.settings.python_version,
+                po.settings.typeshed_path.clone(),
+            );
+            bases.insert(key, Project::without_watcher(po, run_cause));
+            bases
+        });
         Self {
             command: PerTestFlags::command(),
-            base_project: reuse_db.then(|| Project::without_watcher(po, run_cause)),
-            base_version,
+            base_projects,
             run_cause,
             flags_cache: FastHashMap::default(),
             map: Default::default(),
@@ -1110,11 +1171,7 @@ impl ProjectsCache {
         }
         let mut options = ProjectOptions::new(key.0.clone(), key.1.clone());
         set_mypy_path(&mut options);
-        let project = if key.0.python_version_or_default() == self.base_version {
-            self.try_to_reuse_project_parts(options)
-        } else {
-            Project::without_watcher(options, self.run_cause)
-        };
+        let project = self.try_to_reuse_project_parts(options);
         let index = self.projects.len();
         self.projects.push(project);
         self.map.insert(key, index);
@@ -1122,12 +1179,41 @@ impl ProjectsCache {
     }
 
     fn try_to_reuse_project_parts(&mut self, mut options: ProjectOptions) -> Project {
-        if let Some(base_project) = self.base_project.as_mut() {
+        let start = profile_phases().then(Instant::now);
+        options
+            .settings
+            .typeshed_path
+            .get_or_insert_with(test_utils::typeshed_path);
+        let reused = self.base_projects.is_some();
+        let project = if let Some(base_projects) = self.base_projects.as_mut() {
+            // Parsed stubs depend on both Python version and typeshed root.
+            let key = (
+                options.settings.python_version,
+                options.settings.typeshed_path.clone(),
+            );
+            let base_project = base_projects.entry(key).or_insert_with(|| {
+                let mut base_options = ProjectOptions::mypy_default();
+                base_options.settings.python_version = options.settings.python_version;
+                base_options.settings.typeshed_path = options.settings.typeshed_path.clone();
+                set_mypy_path(&mut base_options);
+                Project::without_watcher(base_options, self.run_cause)
+            });
             base_project.try_to_reuse_project_resources_for_tests(options)
         } else {
-            options.settings.typeshed_path = Some(test_utils::typeshed_path());
             Project::without_watcher(options, self.run_cause)
+        };
+        if let Some(start) = start {
+            PHASE_TIMINGS.with_borrow_mut(|times| {
+                if reused {
+                    times.project_reuse += start.elapsed();
+                    times.project_reuse_count += 1;
+                } else {
+                    times.project_fresh += start.elapsed();
+                    times.project_fresh_count += 1;
+                }
+            });
         }
+        project
     }
 }
 
@@ -1214,6 +1300,9 @@ fn run(
     filters: &[&str],
 ) -> usize {
     let start = Instant::now();
+    if profile_phases() {
+        PHASE_TIMINGS.with_borrow_mut(|times| *times = PhaseTimings::default());
+    }
     let mut projects = ProjectsCache::new(!cli_args.no_reuse_db, run_cause);
     let mut full_count = 0;
     let mut passed_count = 0;
@@ -1288,6 +1377,31 @@ fn run(
         }
     );
     timings.print_slowest_if_wanted();
+    if profile_phases() {
+        PHASE_TIMINGS.with_borrow(|times| {
+            println!(
+                "Phase timings (s): setup={:.3} project_setup={:.3} fixture={:.3} ide={:.3} diagnostics={:.3} comparison={:.3} cleanup={:.3}; projects={} bases={} flagged={} common={}",
+                times.setup.as_secs_f64(),
+                times.project_setup.as_secs_f64(),
+                times.fixture.as_secs_f64(),
+                times.ide.as_secs_f64(),
+                times.diagnostics.as_secs_f64(),
+                times.comparison.as_secs_f64(),
+                times.cleanup.as_secs_f64(),
+                projects.projects.len(),
+                projects.base_projects.as_ref().map_or(0, |bases| bases.len()),
+                projects.flag_projects.len(),
+                projects.common_projects.len(),
+            );
+            println!(
+                "Project construction (s): reused={:.3}/{} fresh={:.3}/{}",
+                times.project_reuse.as_secs_f64(),
+                times.project_reuse_count,
+                times.project_fresh.as_secs_f64(),
+                times.project_fresh_count,
+            );
+        });
+    }
     error_count
 }
 

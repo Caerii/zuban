@@ -1455,6 +1455,15 @@ impl Database {
 
     pub fn try_to_reuse_project_resources_for_tests(&mut self, options: ProjectOptions) -> Self {
         let base_settings = &self.project.settings;
+        assert_eq!(
+            options.settings.python_version_or_default(),
+            base_settings.python_version_or_default(),
+            "reused test resources must match the Python version"
+        );
+        assert_eq!(
+            options.settings.typeshed_path, base_settings.typeshed_path,
+            "reused test resources must match the typeshed root"
+        );
         let reuse_sys_path = !options.settings.add_global_packages_default
             && options.settings.environment.is_none()
             && base_settings.environment.is_none()
