@@ -778,6 +778,26 @@ mod lsp_edit_tests {
             )
             .unwrap();
         assert!(project.document(&path).unwrap().diagnostics().is_empty());
+
+        let value_start = "# mypy: ignore_errors = ".len() as u32;
+        project
+            .store_file_with_lsp_changes(
+                path.clone(),
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(
+                        Position::new(0, value_start),
+                        Position::new(0, value_start + 4),
+                    )),
+                    range_length: None,
+                    text: "False".into(),
+                }],
+                |pos| InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            )
+            .unwrap();
+        assert_eq!(project.document(&path).unwrap().diagnostics().len(), 1);
     }
 
     #[test]
@@ -800,6 +820,30 @@ mod lsp_edit_tests {
         for definition in 0..DEFINITION_COUNT {
             current = file.points.get(current).node_index();
             assert_eq!(current == first, definition + 1 == DEFINITION_COUNT);
+        }
+    }
+
+    #[test]
+    fn interleaved_definitions_keep_separate_cycles() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/interleaved-definitions.py")),
+        );
+        project.store_in_memory_file(path.clone(), "x = 1\ny = 1\nx = 2\ny = 2\nx = 3\n".into());
+
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let file = project.db.loaded_python_file(index);
+        for (name, count) in [("x", 3), ("y", 2)] {
+            let first = file.symbol_table.lookup_symbol(name).unwrap();
+            let mut current = first;
+            for definition in 0..count {
+                current = file.points.get(current).node_index();
+                assert_eq!(current == first, definition + 1 == count);
+            }
         }
     }
 
