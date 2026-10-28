@@ -427,7 +427,7 @@ fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize, mixed: bo
     );
 }
 
-fn bench_many_member_conditional_edit(c: &mut Criterion) {
+fn bench_many_member_conditional_edit(c: &mut Criterion, diagnostics: bool) {
     let count = 400;
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
@@ -451,7 +451,12 @@ fn bench_many_member_conditional_edit(c: &mut Criterion) {
     code.push_str("name_399 + 1\n");
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
     let mut use_previous = false;
-    c.bench_function("reference edit in 400-name 400-member conditional", |b| {
+    let name = if diagnostics {
+        "reference edit and diagnostics in 400-name 400-member conditional"
+    } else {
+        "reference edit only in 400-name 400-member conditional"
+    };
+    c.bench_function(name, |b| {
         b.iter(|| {
             let replacement = if use_previous { "name_399" } else { "name_398" };
             project
@@ -469,10 +474,14 @@ fn bench_many_member_conditional_edit(c: &mut Criterion) {
                 )
                 .unwrap();
             use_previous = !use_previous;
-            let mut document = project.document(&path).unwrap();
-            let diagnostics = document.diagnostics();
-            assert!(diagnostics.is_empty());
-            std::hint::black_box(diagnostics);
+            if diagnostics {
+                let mut document = project.document(&path).unwrap();
+                let diagnostics = document.diagnostics();
+                assert!(diagnostics.is_empty());
+                std::hint::black_box(diagnostics);
+            } else {
+                std::hint::black_box(project.code_of_in_memory_file(&path));
+            }
         })
     });
 }
@@ -859,7 +868,8 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_conditional_definitions_edit(c, 2_000, false);
     bench_conditional_definitions_edit(c, 4_000, false);
     bench_conditional_definitions_edit(c, 2_000, true);
-    bench_many_member_conditional_edit(c);
+    bench_many_member_conditional_edit(c, false);
+    bench_many_member_conditional_edit(c, true);
     bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,
