@@ -249,8 +249,30 @@ impl Tree {
             self.0
                 .rebind_name_with_shift_unchecked(code, token_start, token_end)?
         };
-        // Directive byte ranges may move, so the old cache cannot be shared.
-        Ok(Self(Arc::new(tree), Arc::new(OnceLock::new())))
+        // The edited name contains no newline and cannot be inside a comment.
+        // Shift cached directive ranges after the edit instead of rescanning
+        // the whole source file when PythonFile reads its configuration.
+        let directive_cache = self.1.get().and_then(|ranges| {
+            let delta = replacement_len as i64 - (end - start) as i64;
+            let mut shifted = Vec::with_capacity(ranges.len());
+            for &(range_start, range_end) in ranges.iter() {
+                if range_end as usize <= start {
+                    shifted.push((range_start, range_end));
+                } else if range_start as usize >= end {
+                    let range_start = (i64::from(range_start) + delta).try_into().ok()?;
+                    let range_end = (i64::from(range_end) + delta).try_into().ok()?;
+                    shifted.push((range_start, range_end));
+                } else {
+                    // An unexpected overlap falls back to a fresh scan.
+                    return None;
+                }
+            }
+            Some(Arc::new(OnceLock::from(shifted.into_boxed_slice())))
+        });
+        Ok(Self(
+            Arc::new(tree),
+            directive_cache.unwrap_or_else(|| Arc::new(OnceLock::new())),
+        ))
     }
 
     pub fn invalid_empty() -> Self {
@@ -5969,18 +5991,26 @@ mod directive_tests {
     }
 
     #[test]
-    fn length_changing_name_edit_rebuilds_directive_ranges() {
-        let original = "x = 1\n# mypy: ignore_errors = True\n";
-        let edited = "long_name = 1\n# mypy: ignore_errors = True\n";
-        let tree = Tree::parse(original.into());
-        assert_eq!(tree.mypy_inline_config_directives().count(), 1);
-        let rebound = tree.with_name_length_edit(0, 1, 9, edited.into()).unwrap();
-        assert!(!Arc::ptr_eq(&tree.1, &rebound.1));
-        let fresh = Tree::parse(edited.into());
-        assert_eq!(
-            rebound.mypy_inline_config_directives().collect::<Vec<_>>(),
-            fresh.mypy_inline_config_directives().collect::<Vec<_>>()
-        );
+    fn length_changing_name_edit_shifts_cached_directive_ranges() {
+        let original = "# mypy: strict = True\nx = 1\n# mypy: ignore_errors = True\n";
+        let edited = "# mypy: strict = True\nlong_name = 1\n# mypy: ignore_errors = True\n";
+        let start = original.find("x = 1").unwrap();
+        for initialize_before_edit in [false, true] {
+            let tree = Tree::parse(original.into());
+            if initialize_before_edit {
+                assert_eq!(tree.mypy_inline_config_directives().count(), 2);
+            }
+            let rebound = tree
+                .with_name_length_edit(start, start + 1, 9, edited.into())
+                .unwrap();
+            assert!(!Arc::ptr_eq(&tree.1, &rebound.1));
+            assert_eq!(rebound.1.get().is_some(), initialize_before_edit);
+            let fresh = Tree::parse(edited.into());
+            assert_eq!(
+                rebound.mypy_inline_config_directives().collect::<Vec<_>>(),
+                fresh.mypy_inline_config_directives().collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
