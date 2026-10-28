@@ -365,26 +365,37 @@ fn bench_dependency_chain_reference_edit(c: &mut Criterion, source_edit: bool) {
     });
 }
 
-fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize) {
+fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize, mixed: bool) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
-    let mut code = String::from("guard = bool(1)\nif guard:\n");
+    let mut code = if mixed {
+        String::from(
+            "class Box:\n    value: int = 0\nbox = Box()\nguard = bool(1)\nif guard:\n    box.value = 1\n",
+        )
+    } else {
+        String::from("guard = bool(1)\nif guard:\n")
+    };
     for index in 0..count {
         code.push_str(&format!("    name_{index} = {index}\n"));
     }
     code.push_str("else:\n");
+    if mixed {
+        code.push_str("    box.value = 2\n");
+    }
     for index in 0..count {
         code.push_str(&format!("    name_{index} = {index}\n"));
     }
     let current = format!("name_{}", count - 1);
     let previous = format!("name_{}", count - 2);
+    let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
     code.push_str(&format!("{current} + 1\n"));
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
     let mut use_previous = false;
     c.bench_function(
         &format!(
-            "reference edit and diagnostics in {}k-name conditional",
-            count / 1_000
+            "reference edit and diagnostics in {}k-name {}conditional",
+            count / 1_000,
+            if mixed { "mixed " } else { "" },
         ),
         |b| {
             b.iter(|| {
@@ -394,8 +405,8 @@ fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize) {
                         path.clone(),
                         vec![TextDocumentContentChangeEvent {
                             range: Some(Range::new(
-                                Position::new((2 * count + 3) as u32, 0),
-                                Position::new((2 * count + 3) as u32, current.len() as u32),
+                                Position::new(line, 0),
+                                Position::new(line, current.len() as u32),
                             )),
                             range_length: None,
                             text: replacement.into(),
@@ -794,8 +805,10 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_large_reference_lsp_edit(c, true, true);
     bench_dependency_chain_reference_edit(c, false);
     bench_dependency_chain_reference_edit(c, true);
-    bench_conditional_definitions_edit(c, 1_000);
-    bench_conditional_definitions_edit(c, 2_000);
+    bench_conditional_definitions_edit(c, 1_000, false);
+    bench_conditional_definitions_edit(c, 2_000, false);
+    bench_conditional_definitions_edit(c, 4_000, false);
+    bench_conditional_definitions_edit(c, 2_000, true);
     bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,

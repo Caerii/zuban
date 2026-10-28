@@ -436,7 +436,7 @@ struct Frame {
 struct NameEntryIndex {
     indexed_len: usize,
     first_positions: HashMap<PointLink, usize>,
-    has_non_name: bool,
+    non_name_positions: Vec<usize>,
 }
 
 impl Frame {
@@ -451,7 +451,7 @@ impl Frame {
             if let FlowKey::Name(link) = entry.key {
                 index.first_positions.entry(link).or_insert(position);
             } else {
-                index.has_non_name = true;
+                index.non_name_positions.push(position);
             }
         }
         index.indexed_len = self.entries.len();
@@ -881,8 +881,13 @@ impl FlowAnalysis {
             && tos_frame.entries.len() >= 64
         {
             let link = *link;
-            let index = tos_frame.ensure_name_index();
-            if !index.has_non_name {
+            tos_frame.ensure_name_index();
+            let index = tos_frame.initial_name_index.as_ref().unwrap();
+            if index.non_name_positions.iter().all(|&position| {
+                !tos_frame.entries[position]
+                    .key
+                    .is_child_of(i_s.db, &new_entry.key)
+            }) {
                 let existing = index.first_positions.get(&link).copied();
                 if let Some(position) = existing {
                     let entry = &mut tos_frame.entries[position];

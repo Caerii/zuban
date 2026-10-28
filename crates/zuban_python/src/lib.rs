@@ -971,6 +971,7 @@ mod lsp_edit_tests {
             count in 120usize..151,
             string_else in any::<bool>(),
             missing_last_else in any::<bool>(),
+            member_in_branches in any::<bool>(),
         ) {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
@@ -980,11 +981,16 @@ mod lsp_edit_tests {
             let path = PathWithScheme::with_file_scheme(
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-conditional-edit.py")),
             );
-            let mut code = String::from("guard = bool(1)\nif guard:\n");
+            let mut code = if member_in_branches {
+                String::from("class Box:\n    value: int = 0\nbox = Box()\nguard = bool(1)\nif guard:\n    box.value = 1\n")
+            } else {
+                String::from("guard = bool(1)\nif guard:\n")
+            };
             for index in 0..count {
                 code.push_str(&format!("    name_{index} = {index}\n"));
             }
             code.push_str("else:\n");
+            if member_in_branches { code.push_str("    box.value = 2\n"); }
             for index in 0..count {
                 if missing_last_else && index == count - 1 { continue; }
                 if string_else {
