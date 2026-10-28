@@ -56,18 +56,39 @@ type StoredComplexPoints = InsertOnlyVec<ComplexPoint, StoredComplexPoint>;
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ComplexValues {
     binding_prefix: Option<Arc<StoredComplexPoints>>,
+    replay_prefix: Option<Arc<StoredComplexPoints>>,
     inferred: StoredComplexPoints,
+    inferred_has_mutable: OnceLock<()>,
 }
 
 impl ComplexValues {
     pub fn get(&self, index: usize) -> &ComplexPoint {
-        if let Some(prefix) = &self.binding_prefix {
-            if index < prefix.len() {
-                return &prefix[index];
+        match (&self.binding_prefix, &self.replay_prefix) {
+            (Some(binding), None) => {
+                if index < binding.len() {
+                    &binding[index]
+                } else {
+                    &self.inferred[index - binding.len()]
+                }
             }
-            return &self.inferred[index - prefix.len()];
+            (Some(binding), Some(replay)) => {
+                if index < binding.len() {
+                    &binding[index]
+                } else if index - binding.len() < replay.len() {
+                    &replay[index - binding.len()]
+                } else {
+                    &self.inferred[index - binding.len() - replay.len()]
+                }
+            }
+            (None, Some(replay)) => {
+                if index < replay.len() {
+                    &replay[index]
+                } else {
+                    &self.inferred[index - replay.len()]
+                }
+            }
+            (None, None) => &self.inferred[index],
         }
-        &self.inferred[index]
     }
 
     pub fn insert(
@@ -81,13 +102,17 @@ impl ComplexValues {
             .binding_prefix
             .as_ref()
             .map_or(0, |prefix| prefix.len())
+            + self.replay_prefix.as_ref().map_or(0, |prefix| prefix.len())
             + self.inferred.len()) as u32;
         let stored = match complex {
             // A Type is immutable, so replay can share cached instances.
             complex @ ComplexPoint::TypeInstance(_) => {
                 StoredComplexPoint::Shared(Arc::new(complex))
             }
-            complex => StoredComplexPoint::Owned(Box::new(complex)),
+            complex => {
+                let _ = self.inferred_has_mutable.set(());
+                StoredComplexPoint::Owned(Box::new(complex))
+            }
         };
         self.inferred.push(std::pin::Pin::new(stored));
         points.set(
@@ -100,15 +125,50 @@ impl ComplexValues {
         self.binding_prefix
             .iter()
             .flat_map(|prefix| unsafe { prefix.iter() })
+            .chain(
+                self.replay_prefix
+                    .iter()
+                    .flat_map(|prefix| unsafe { prefix.iter() }),
+            )
             .chain(unsafe { self.inferred.iter() })
+    }
+
+    fn clone_for_tail_replay(&self) -> Self {
+        // Only immutable type instances can be shared with another file
+        // version. Other complex points may carry mutable inference state.
+        if self.replay_prefix.is_some()
+            || self.inferred.is_empty()
+            || self.inferred_has_mutable.get().is_some()
+        {
+            return self.clone();
+        }
+        let inferred = self.inferred.clone();
+        // A concurrent insertion marks the vector before pushing. Recheck
+        // after copying so a mutable value cannot enter the shared snapshot.
+        if self.inferred_has_mutable.get().is_some() {
+            return Self {
+                binding_prefix: self.binding_prefix.clone(),
+                replay_prefix: None,
+                inferred,
+                inferred_has_mutable: self.inferred_has_mutable.clone(),
+            };
+        }
+        Self {
+            binding_prefix: self.binding_prefix.clone(),
+            replay_prefix: Some(Arc::new(inferred)),
+            inferred: Default::default(),
+            inferred_has_mutable: OnceLock::new(),
+        }
     }
 
     fn freeze_binding_prefix(&mut self) -> Option<Arc<StoredComplexPoints>> {
         debug_assert!(self.binding_prefix.is_none());
+        debug_assert!(self.replay_prefix.is_none());
         if self.inferred.is_empty() {
             return None;
         }
         let prefix = Arc::new(std::mem::take(&mut self.inferred));
+        self.inferred_has_mutable.take();
         self.binding_prefix = Some(prefix.clone());
         Some(prefix)
     }
@@ -116,14 +176,18 @@ impl ComplexValues {
     fn from_binding_prefix(prefix: Option<Arc<StoredComplexPoints>>) -> Self {
         Self {
             binding_prefix: prefix,
+            replay_prefix: None,
             inferred: Default::default(),
+            inferred_has_mutable: OnceLock::new(),
         }
     }
 
     #[expect(dead_code)]
     pub fn clear(&mut self) {
         self.binding_prefix = None;
-        self.inferred.clear()
+        self.replay_prefix = None;
+        self.inferred.clear();
+        self.inferred_has_mutable.take();
     }
 }
 
@@ -466,7 +530,7 @@ impl<'db> PythonFile {
         }
         Some(FlowReuseCandidate {
             points: self.points.clone_for_tail_replay(),
-            complex_points: self.complex_points.clone(),
+            complex_points: self.complex_points.clone_for_tail_replay(),
             snapshot,
             tail_stmt_index,
         })
@@ -1559,6 +1623,91 @@ fn add_error_if_typeshed_is_overwritten(file_entry: &FileEntry) -> Option<IssueK
 #[cfg(test)]
 mod stored_complex_point_tests {
     use super::*;
+
+    #[test]
+    fn tail_replay_shares_immutable_inference_and_keeps_appended_indices_stable() {
+        let binding_points = Points::new(4);
+        let mut original = ComplexValues::default();
+        original.insert(
+            &binding_points,
+            0,
+            ComplexPoint::TypeInstance(Type::None),
+            Locality::Complex,
+        );
+        original.freeze_binding_prefix();
+        original.insert(
+            &binding_points,
+            1,
+            ComplexPoint::TypeInstance(Type::ERROR),
+            Locality::Complex,
+        );
+
+        let first = original.clone_for_tail_replay();
+        assert_eq!(binding_points.get(1).complex_index(), 1);
+        assert!(matches!(
+            first.get(1),
+            ComplexPoint::TypeInstance(Type::ERROR)
+        ));
+        let first_points = Points::new(4);
+        first.insert(
+            &first_points,
+            2,
+            ComplexPoint::TypeInstance(Type::None),
+            Locality::Complex,
+        );
+
+        let second = first.clone_for_tail_replay();
+        assert!(Arc::ptr_eq(
+            first.replay_prefix.as_ref().unwrap(),
+            second.replay_prefix.as_ref().unwrap()
+        ));
+        assert_eq!(first_points.get(2).complex_index(), 2);
+        assert!(matches!(
+            second.get(2),
+            ComplexPoint::TypeInstance(Type::None)
+        ));
+        let second_points = Points::new(4);
+        second.insert(
+            &second_points,
+            3,
+            ComplexPoint::TypeInstance(Type::ERROR),
+            Locality::Complex,
+        );
+        assert_eq!(second_points.get(3).complex_index(), 3);
+        assert!(matches!(
+            second.get(3),
+            ComplexPoint::TypeInstance(Type::ERROR)
+        ));
+        assert_eq!(unsafe { original.iter() }.count(), 2);
+        assert_eq!(unsafe { first.iter() }.count(), 3);
+        assert_eq!(unsafe { second.iter() }.count(), 4);
+    }
+
+    #[test]
+    fn tail_replay_copies_inference_with_mutable_alias_state() {
+        let link = PointLink::new(FileIndex(0), 0);
+        let alias =
+            crate::database::TypeAlias::new(TypeVarLikes::from_vec(Vec::new()), link, link, false);
+        let points = Points::new(1);
+        let original = ComplexValues::default();
+        original.insert(
+            &points,
+            0,
+            ComplexPoint::TypeAlias(Box::new(alias)),
+            Locality::Complex,
+        );
+        let replay = original.clone_for_tail_replay();
+        assert!(replay.replay_prefix.is_none());
+        let ComplexPoint::TypeAlias(original_alias) = original.get(0) else {
+            panic!("expected an alias");
+        };
+        let ComplexPoint::TypeAlias(replay_alias) = replay.get(0) else {
+            panic!("expected an alias");
+        };
+        original_alias.set_valid(Type::None, false, false);
+        assert!(!original_alias.calculating());
+        assert!(replay_alias.calculating());
+    }
 
     #[test]
     fn cloned_type_instances_share_storage_but_alias_state_is_independent() {
