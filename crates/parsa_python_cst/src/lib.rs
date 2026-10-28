@@ -5521,7 +5521,9 @@ mod incremental_name_tests {
     fn syntax_changing_names_fall_back_to_parsing() {
         for (old, start, end, new) in [
             ("foo = 1\n", 0, 3, "for = 1\n"),
-            ("foo = 1\n", 0, 3, "case = 1\n"),
+            ("xxxx = 1\n", 0, 4, "case = 1\n"),
+            ("xxxxx = 1\n", 0, 5, "match = 1\n"),
+            ("xxxx = 1\n", 0, 4, "type = 1\n"),
             ("x = 1\n", 0, 1, "_ = 1\n"),
             ("x\"hi\"\n", 0, 1, "f\"hi\"\n"),
             ("1x3\n", 1, 3, "1e3\n"),
@@ -5537,6 +5539,109 @@ mod incremental_name_tests {
                     .is_err(),
                 "{old:?} -> {new:?}"
             );
+        }
+    }
+
+    #[test]
+    fn accepted_name_edits_have_fresh_parse_structure() {
+        let fixtures = [
+            ("x = 1\n", 0, 1),
+            ("x('hi')\n", 0, 1),
+            ("obj.foo = 1\n", 4, 7),
+            ("def foo():\n    pass\n", 4, 7),
+            ("from mod import foo\n", 16, 19),
+            ("match foo:\n    case _:\n        pass\n", 6, 9),
+            ("f'{foo}'\n", 3, 6),
+            ("if foo:\n    pass\n", 3, 6),
+            ("foo.bar\n", 0, 3),
+        ];
+        let replacements = [
+            "a", "b", "f", "r", "x", "y", "_", "foo", "bar", "for", "def", "try", "xor", "f00",
+            "r00",
+        ];
+        let mut checked = 0;
+        for (old, start, end) in fixtures {
+            let tree = Tree::parse(old.into());
+            for replacement in replacements {
+                if replacement.len() != end - start
+                    || !tree.can_reuse_syntax_for_name_edit(start, end, replacement)
+                {
+                    continue;
+                }
+                let new = format!("{}{}{}", &old[..start], replacement, &old[end..]);
+                let reused = tree
+                    .with_same_length_name_edit(start, end, new.clone().into())
+                    .unwrap();
+                let fresh = Tree::parse(new.into());
+                assert_eq!(reused.code(), fresh.code());
+                assert_eq!(
+                    reused.length(),
+                    fresh.length(),
+                    "{old:?} -> {replacement:?}"
+                );
+                for index in 0..reused.length() as NodeIndex {
+                    let a = reused.0.node_by_index(index);
+                    let b = fresh.0.node_by_index(index);
+                    assert_eq!(
+                        (
+                            a.type_(),
+                            a.start(),
+                            a.end(),
+                            a.parent().map(|node| node.index),
+                        ),
+                        (
+                            b.type_(),
+                            b.start(),
+                            b.end(),
+                            b.parent().map(|node| node.index),
+                        ),
+                        "{old:?} -> {replacement:?}, node {index}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 30, "only {checked} edits were checked");
+    }
+
+    #[test]
+    fn accepted_three_letter_edits_match_fresh_parse() {
+        for (old, start) in [
+            ("obj.foo = 1\n", 4),
+            ("match foo:\n    case _:\n        pass\n", 6),
+            ("f'{foo}'\n", 3),
+        ] {
+            let tree = Tree::parse(old.into());
+            for first in b'a'..=b'z' {
+                for second in b'a'..=b'z' {
+                    for third in b'a'..=b'z' {
+                        let name = [first, second, third];
+                        let replacement = std::str::from_utf8(&name).unwrap();
+                        if !tree.can_reuse_syntax_for_name_edit(start, start + 3, replacement) {
+                            continue;
+                        }
+                        let new = format!("{}{}{}", &old[..start], replacement, &old[start + 3..]);
+                        let reused = tree
+                            .with_same_length_name_edit(start, start + 3, new.clone().into())
+                            .unwrap();
+                        let fresh = Tree::parse(new.into());
+                        assert_eq!(
+                            reused.length(),
+                            fresh.length(),
+                            "{old:?} -> {replacement:?}"
+                        );
+                        for index in 0..reused.length() as NodeIndex {
+                            let a = reused.0.node_by_index(index);
+                            let b = fresh.0.node_by_index(index);
+                            assert_eq!(
+                                (a.type_(), a.start(), a.end(), a.parent().map(|n| n.index)),
+                                (b.type_(), b.start(), b.end(), b.parent().map(|n| n.index)),
+                                "{old:?} -> {replacement:?}, node {index}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }
