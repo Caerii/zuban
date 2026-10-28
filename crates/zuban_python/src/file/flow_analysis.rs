@@ -726,23 +726,20 @@ impl Frame {
     }
 
     fn add_entry(&mut self, i_s: &InferenceState, entry: Entry) {
-        for old_entry in &mut self.entries {
-            if old_entry.key.equals(i_s.db, &entry.key) {
-                if let Some(new) = old_entry.common_sub_type(i_s, &entry) {
-                    old_entry.type_ = new;
-                }
-                return;
+        if let Some(position) = self.lookup_entry_position(i_s.db, &entry.key) {
+            let old_entry = &mut self.entries[position];
+            if let Some(new) = old_entry.common_sub_type(i_s, &entry) {
+                old_entry.type_ = new;
             }
+            return;
         }
         self.entries.push(entry)
     }
 
     fn overwrite_entry(&mut self, db: &Database, entry: Entry) {
-        for old_entry in &mut self.entries {
-            if old_entry.key.equals(db, &entry.key) {
-                *old_entry = entry;
-                return;
-            }
+        if let Some(position) = self.lookup_entry_position(db, &entry.key) {
+            self.entries[position] = entry;
+            return;
         }
         self.entries.push(entry)
     }
