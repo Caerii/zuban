@@ -1,6 +1,7 @@
 mod ide;
 
 use std::{
+    cell::OnceCell,
     cmp::Ordering,
     collections::BinaryHeap,
     env,
@@ -19,7 +20,7 @@ use config::{
 };
 use ide::find_and_check_ide_tests;
 use regex::{Captures, Regex, Replacer};
-use test_utils::{Step, calculate_steps};
+use test_utils::{Step, Steps, calculate_steps};
 use utils::{FastHashMap, FastHashSet};
 use vfs::{NormalizedPath, PathWithScheme, SimpleLocalFS, VfsHandler};
 use zuban_python::{Project, RunCause};
@@ -217,12 +218,12 @@ struct PerTestFlags {
     disallow_empty_bodies: bool,
 }
 
-#[derive(Debug)]
 struct TestCase<'name, 'code> {
     file_name: &'name str,
     name: String,
     code: &'code str,
     from_mypy_test_suite: bool,
+    steps: OnceCell<Steps<'code>>,
 }
 
 #[derive(Clone, Copy)]
@@ -447,7 +448,9 @@ impl TestCase<'_, '_> {
     }
 
     fn run(&self, projects: &mut ProjectsCache, mode: Mode) -> anyhow::Result<bool> {
-        let steps = calculate_steps(Some(self.file_name), self.code);
+        let steps = self
+            .steps
+            .get_or_init(|| calculate_steps(Some(self.file_name), self.code));
         let common_slot = (steps.flags.is_empty()
             && !steps.steps[0].files.contains_key("mypy.ini")
             && !steps.steps[0].files.contains_key("pyproject.toml")
@@ -462,9 +465,9 @@ impl TestCase<'_, '_> {
                 cached.clone()
             } else {
                 // Reuse the Command, then cache the parsed value for identical fixture flags.
-                let matches = projects
-                    .command
-                    .try_get_matches_from_mut(std::iter::once("").chain(steps.flags.into_iter()))?;
+                let matches = projects.command.try_get_matches_from_mut(
+                    std::iter::once("").chain(steps.flags.iter().copied()),
+                )?;
                 let parsed = PerTestFlags::from_arg_matches(&matches)?;
                 projects
                     .flags_cache
@@ -472,7 +475,7 @@ impl TestCase<'_, '_> {
                 parsed
             }
         };
-        let steps = steps.steps;
+        let steps = &steps.steps;
         if flags.only_language_server && !matches!(projects.run_cause, RunCause::LanguageServer)
             || flags.no_windows && cfg!(windows)
             || match flags.cli.mode {
@@ -719,7 +722,7 @@ impl TestCase<'_, '_> {
         let mut seen_flat_files = FastHashSet::default();
         let mut directories = Vec::new();
         let mut seen_directories = FastHashSet::default();
-        for step in &steps {
+        for step in steps {
             for path in step.files.keys() {
                 // We need to unload the whole directory, otherwise we might leave up namespace
                 // packages for other tests.
@@ -1170,13 +1173,22 @@ fn main() -> ExitCode {
             (from_mypy_test_suite, file_name, code)
         })
         .collect();
+    let cases_by_file: Vec<_> = files
+        .iter()
+        .map(|(from_mypy_test_suite, file_name, code)| {
+            (
+                file_name.as_str(),
+                mypy_style_cases(file_name, code, *from_mypy_test_suite),
+            )
+        })
+        .collect();
 
     let mut error_count = 0;
     if !cli_args.only_language_server {
         error_count += run(
             &cli_args,
             RunCause::TypeChecking,
-            &files,
+            &cases_by_file,
             &skipped,
             &filters,
         );
@@ -1185,7 +1197,7 @@ fn main() -> ExitCode {
         error_count += run(
             &cli_args,
             RunCause::LanguageServer,
-            &files,
+            &cases_by_file,
             &skipped,
             &filters,
         )
@@ -1197,7 +1209,7 @@ fn main() -> ExitCode {
 fn run(
     cli_args: &CliArgs,
     run_cause: RunCause,
-    files: &[(bool, String, String)],
+    cases_by_file: &[(&str, Vec<TestCase<'_, '_>>)],
     skipped: &SkippedIndex,
     filters: &[&str],
 ) -> usize {
@@ -1206,15 +1218,15 @@ fn run(
     let mut full_count = 0;
     let mut passed_count = 0;
     let mut error_count = 0;
-    let file_count = files.len();
+    let file_count = cases_by_file.len();
     let mut error_summary = String::new();
     let mut allowed_to_run_when_start_at = false;
     let mut timings = Timings::new(cli_args.slowest.unwrap_or_default());
-    for (from_mypy_test_suite, file_name, code) in files {
-        for case in mypy_style_cases(file_name, code, *from_mypy_test_suite) {
+    for (file_name, cases) in cases_by_file {
+        for case in cases {
             if !filters.is_empty()
                 && !filters.contains(&&*case.name)
-                && !filters.contains(&file_name.as_str())
+                && !filters.contains(file_name)
             {
                 continue;
             }
@@ -1247,7 +1259,7 @@ fn run(
                     }
                 }
             };
-            if !from_mypy_test_suite {
+            if !case.from_mypy_test_suite {
                 timings.run(case.file_name, &case.name, || {
                     // Run our own tests both with mypy-compatible and without it.
                     check(case.run(&mut projects, Mode::Default), Mode::Default)
@@ -1292,6 +1304,7 @@ fn mypy_style_cases<'a, 'b>(
             name,
             code: &code[start..end],
             from_mypy_test_suite,
+            steps: OnceCell::new(),
         });
     };
 
