@@ -385,9 +385,28 @@ fn bench_type_checking(c: &mut Criterion) {
     c.bench_function("parse edited small file", |b| {
         b.iter(|| std::hint::black_box(Tree::parse(small_code.clone())))
     });
+    let small_tree = Tree::parse(small_code.clone());
+    c.bench_function("scan small file for type ignores", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                small_tree.type_ignore_comment_for(0, small_tree.code().len() as u32),
+            )
+        })
+    });
+    let ignored_tree = Tree::parse("x = 1 # type: ignore\n".into());
+    c.bench_function("scan commented line for type ignore", |b| {
+        b.iter(|| std::hint::black_box(ignored_tree.type_ignore_comment_for(0, 5)))
+    });
     let many_lines = Tree::parse("x = 1\n".repeat(10_000).into_boxed_str());
     c.bench_function("scan 10000 lines for mypy directives", |b| {
         b.iter(|| std::hint::black_box(many_lines.mypy_inline_config_directives().count()))
+    });
+    c.bench_function("scan 10000 lines for type ignores", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                many_lines.type_ignore_comment_for(0, many_lines.code().len() as u32),
+            )
+        })
     });
     let assignments = (0..100)
         .map(|i| format!("x{i} = {i}\n"))

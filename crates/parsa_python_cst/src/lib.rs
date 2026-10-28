@@ -124,6 +124,9 @@ impl Tree {
         mut start_at: CodeIndex,
         region: &str,
     ) -> Option<TypeIgnoreComment<'_>> {
+        if !region.contains('#') {
+            return None;
+        }
         let mut result = None;
         for line in region.split(['\n', '\r']) {
             let mut iterator = line.split('#');
@@ -5425,5 +5428,24 @@ mod directive_tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn type_ignore_fast_absence_preserves_comment_handling() {
+        let plain = Tree::parse("x = 1\ny = 2\n".into());
+        assert!(
+            plain
+                .type_ignore_comment_for(0, plain.code().len() as CodeIndex)
+                .is_none()
+        );
+
+        let ordinary_comment = Tree::parse("x = 1 # ordinary\n".into());
+        assert!(ordinary_comment.type_ignore_comment_for(0, 5).is_none());
+
+        let ignored = Tree::parse("x = 1 # type: ignore\n".into());
+        assert!(matches!(
+            ignored.type_ignore_comment_for(0, 5),
+            Some(TypeIgnoreComment::WithoutCode)
+        ));
     }
 }
