@@ -14,6 +14,7 @@ workspace = true
 parsa.workspace = true
 lazy_static.workspace = true
 regex.workspace = true
+memchr.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

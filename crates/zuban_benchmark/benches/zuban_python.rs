@@ -290,6 +290,25 @@ fn bench_length_changing_large_lsp_edit(c: &mut Criterion) {
     });
 }
 
+fn bench_large_lsp_edit_components(c: &mut Criterion) {
+    let code = format!("x = 1\n#{}\n", "a".repeat(100_000));
+    c.bench_function("construct text for 100 KiB LSP edit", |b| {
+        b.iter(|| {
+            let mut updated = String::with_capacity(code.len() + 1);
+            updated.push_str("yy");
+            updated.push_str(&code[1..]);
+            std::hint::black_box(updated);
+        })
+    });
+    c.bench_function("parse prepared 100 KiB LSP edit", |b| {
+        b.iter_batched(
+            || format!("yy{}", &code[1..]).into_boxed_str(),
+            |updated| std::hint::black_box(Tree::parse(updated)),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
 fn bench_warm_multi_lsp_edit(c: &mut Criterion, edit_count: u32) {
     let (mut project, paths) = prepare_independent_files(1000);
     let edited_path = paths[0].clone();
@@ -563,6 +582,7 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_unchanged_lsp_edit(c);
     bench_same_length_large_lsp_edit(c);
     bench_length_changing_large_lsp_edit(c);
+    bench_large_lsp_edit_components(c);
     bench_warm_multi_lsp_edit(c, 32);
     bench_warm_multi_lsp_edit(c, 256);
     bench_large_reverse_lsp_edit(c);

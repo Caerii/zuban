@@ -388,28 +388,23 @@ impl PythonTokenizer<'_> {
     #[inline]
     fn skip_whitespace(&mut self) -> usize {
         let mut indentation = 0;
-        let mut was_comment = false;
-        let iterator = code_from_start(self.code, self.index).chars();
-        for character in iterator {
-            if character == '\n' || character == '\r' {
-                if !self.previous_token_was_newline {
-                    return indentation;
-                }
-                was_comment = false;
-                indentation = 0;
-            } else if !was_comment {
-                if character == ' ' || character == '\t' || character == FORM_FEED {
-                    if self.previous_token_was_newline {
-                        indentation += 1;
-                    }
-                } else if character == '#' {
-                    was_comment = true;
-                    indentation = 0;
-                } else if character == '\n' || character == '\r' {
+        'scan: loop {
+            let iterator = code_from_start(self.code, self.index).chars();
+            for character in iterator {
+                if character == '\n' || character == '\r' {
                     if !self.previous_token_was_newline {
                         return indentation;
                     }
                     indentation = 0;
+                } else if character == ' ' || character == '\t' || character == FORM_FEED {
+                    if self.previous_token_was_newline {
+                        indentation += 1;
+                    }
+                } else if character == '#' {
+                    indentation = 0;
+                    let rest = &self.code.as_bytes()[self.index + 1..];
+                    self.index += 1 + memchr::memchr2(b'\r', b'\n', rest).unwrap_or(rest.len());
+                    continue 'scan;
                 } else if character == '\\' {
                     let mut found_newline = false;
                     if let Some(&c) = self.code.as_bytes().get(self.index + 1)
@@ -431,12 +426,12 @@ impl PythonTokenizer<'_> {
                     self.skip_whitespace();
                     return indentation;
                 } else {
-                    break;
+                    return indentation;
                 }
+                self.index += character.len_utf8();
             }
-            self.index += character.len_utf8();
+            return indentation;
         }
-        indentation
     }
 
     #[inline]
@@ -643,6 +638,10 @@ mod tests {
     parametrize!(
         simple1 "asdf + 11" => [(0, 4, Name), (5, 1, Operator), (7, 2, Number)];
         simple2 "1foo1" => [(0, 1, Number), (1, 4, Name)];
+        comment_lf "# x\nfoo" => [(4, 3, Name)];
+        comment_crlf "# x\r\nfoo" => [(5, 3, Name)];
+        comment_cr "# x\rfoo" => [(4, 3, Name)];
+        comment_unicode "#😀\nfoo" => [(6, 3, Name)];
         name1 "__" => [(0, 2, Name)];
         unicode1 "我あφ()" => [(0, 8, Name), (8, 1, Operator), (9, 1, Operator)];
         //unicode2 "மெல்லினம்" => [(0, 27, Name)];
@@ -815,4 +814,13 @@ mod tests {
         f_string_bracket_escape r#"f"x{{y}}z""# => [
             (0, 2, FStringStart), (2, 7, FStringString), (9, 1, FStringEnd)];
     );
+
+    #[test]
+    fn many_comment_lines_do_not_recurse() {
+        let code = format!("{}foo", "# x\n".repeat(20_000));
+        let tokens: Vec<_> = PythonTokenizer::new(&code)
+            .map(|token| (token.start_index as usize, token.length, token.type_))
+            .collect();
+        assert_eq!(tokens, [(80_000, 3, Name), (code.len(), 0, Endmarker)]);
+    }
 }
