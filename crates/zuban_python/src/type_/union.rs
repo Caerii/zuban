@@ -12,6 +12,10 @@ use crate::prelude::*;
 
 impl Type {
     pub fn simplified_union(&self, i_s: &InferenceState, other: &Self) -> Self {
+        // Union normalization cannot change two identical atomic types.
+        if matches!(self, Self::Class(_) | Self::Literal(_) | Self::None) && self == other {
+            return self.clone();
+        }
         debug!(
             "Simplify union for {} and {}",
             self.format_short(i_s.db),
@@ -93,6 +97,56 @@ impl Type {
         Self::Union(UnionType::new(
             entries, true, // TODO should we calculate this?
         ))
+    }
+}
+
+#[cfg(test)]
+mod equal_atomic_union_tests {
+    use proptest::prelude::*;
+    use vfs::PathWithScheme;
+
+    use super::*;
+    use crate::{Project, ProjectOptions, RunCause};
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn identical_atomic_types_match_general_normalization(
+            value in any::<i64>(),
+            boolean in any::<bool>(),
+            implicit in any::<bool>(),
+        ) {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path("/union-identity.py")),
+            );
+            project.store_in_memory_file(path.clone(), "x = 1\n".into());
+            let file_index = project.db.vfs.in_memory_file(&path).unwrap();
+            let file = project.db.loaded_python_file(file_index);
+            let i_s = InferenceState::new(&project.db, file);
+            let literal = |kind| Type::Literal(if implicit {
+                Literal::new_implicit(kind)
+            } else {
+                Literal::new(kind)
+            });
+            for t in [
+                Type::None,
+                literal(LiteralKind::Int(value.into())),
+                literal(LiteralKind::Bool(boolean)),
+                project.db.python_state.int_type(),
+                project.db.python_state.bool_type(),
+                project.db.python_state.object_type_ref().clone(),
+            ] {
+                prop_assert_eq!(
+                    t.simplified_union(&i_s, &t),
+                    Type::simplified_union_from_iterators(&i_s, [&t, &t].into_iter()),
+                );
+            }
+        }
     }
 }
 
