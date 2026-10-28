@@ -18,7 +18,7 @@ use vfs::{Directory, DirectoryEntry, FileEntry, FileIndex, PathWithScheme, Works
 use super::{
     FLOW_ANALYSIS,
     file_state::File,
-    flow_analysis::DelayedDiagnostic,
+    flow_analysis::{DelayedDiagnostic, FlowSnapshot},
     imports::is_package_name,
     inference::Inference,
     name_binder::{DbInfos, NameBinder},
@@ -139,6 +139,7 @@ pub(crate) struct PythonFile {
     // Finished during binding; clones can share the names and their backing source text.
     pub symbol_table: Arc<SymbolTable>,
     binding_snapshot: Option<Arc<BindingSnapshot>>,
+    pub(super) tail_flow_snapshot: RwLock<Option<Arc<FlowSnapshot>>>,
     standalone_module_references: Arc<[NodeIndex]>,
     maybe_dunder_all: OnceLock<Option<DunderAllState>>, // For __all__
     pub points: Points,
@@ -168,6 +169,14 @@ pub(crate) struct ReferenceBindingCandidate {
     replacement_len: usize,
     flags: Option<FinalizedTypeCheckerFlags>,
     ignore_type_errors: Option<IgnoreFileReason>,
+    flow_reuse: Option<FlowReuseCandidate>,
+}
+
+struct FlowReuseCandidate {
+    points: Points,
+    complex_points: ComplexValues,
+    snapshot: Arc<FlowSnapshot>,
+    tail_stmt_index: NodeIndex,
 }
 
 struct BindingSnapshot {
@@ -261,6 +270,7 @@ impl Clone for PythonFile {
             tree: self.tree.clone(),
             symbol_table: self.symbol_table.clone(),
             binding_snapshot: self.binding_snapshot.clone(),
+            tail_flow_snapshot: RwLock::new(self.tail_flow_snapshot.read().unwrap().clone()),
             standalone_module_references: self.standalone_module_references.clone(),
             maybe_dunder_all: self.maybe_dunder_all.clone(),
             points: self.points.clone(),
@@ -364,6 +374,7 @@ impl vfs::VfsFile for PythonFile {
         // The snapshot predates this dependency change and cannot be reused
         // to reconstruct the next in-memory version.
         self.binding_snapshot = None;
+        *self.tail_flow_snapshot.write().unwrap() = None;
         self.points.invalidate_references_to(file_index);
         self.issues.invalidate_non_name_binder_issues();
         if let Some(cache) = self.stub_cache.as_mut() {
@@ -394,6 +405,51 @@ impl fmt::Debug for PythonFile {
 }
 
 impl<'db> PythonFile {
+    pub(super) fn bare_tail_name_stmt(&self) -> Option<(NodeIndex, Name<'_>)> {
+        self.binding_snapshot.as_ref()?;
+        let last = self.tree.root().iter_stmt_likes().last()?;
+        let AtomContent::Name(name) = last.node.maybe_simple_expr()?.maybe_unpacked_atom()? else {
+            return None;
+        };
+        (self.tree.code().get(name.end() as usize..) == Some("\n"))
+            .then_some((last.parent_index, name))
+    }
+
+    fn flow_reuse_candidate(
+        &self,
+        name_index: NodeIndex,
+        start: usize,
+        end: usize,
+        replacement_len: usize,
+    ) -> Option<FlowReuseCandidate> {
+        if replacement_len != end - start
+            || !self.has_calculated_diagnostics()
+            || unsafe { self.issues.iter().next().is_some() }
+        {
+            return None;
+        }
+        let (tail_stmt_index, tail_name) = self.bare_tail_name_stmt()?;
+        if tail_name.index() != name_index || tail_stmt_index > name_index {
+            return None;
+        }
+        if !self
+            .tree
+            .root()
+            .iter_stmt_likes()
+            .take_while(|stmt| stmt.parent_index != tail_stmt_index)
+            .all(|stmt| self.points.get(stmt.parent_index).calculated())
+        {
+            return None;
+        }
+        let snapshot = self.tail_flow_snapshot.read().unwrap().clone()?;
+        Some(FlowReuseCandidate {
+            points: self.points.clone(),
+            complex_points: self.complex_points.clone(),
+            snapshot,
+            tail_stmt_index,
+        })
+    }
+
     pub fn capture_binding_snapshot(&mut self) {
         if self.binding_snapshot.is_some()
             || self.standalone_module_references.is_empty()
@@ -459,6 +515,7 @@ impl<'db> PythonFile {
             replacement_len,
             flags: self.flags.clone(),
             ignore_type_errors: self.ignore_type_errors,
+            flow_reuse: self.flow_reuse_candidate(name.index(), start, end, replacement_len),
         })
     }
 
@@ -466,7 +523,7 @@ impl<'db> PythonFile {
         file_index: FileIndex,
         file_entry: &FileEntry,
         tree: Tree,
-        candidate: ReferenceBindingCandidate,
+        mut candidate: ReferenceBindingCandidate,
     ) -> Result<Self, Tree> {
         let name = Name::by_index(&tree, candidate.name_index);
         if file_index != candidate.file_index
@@ -494,27 +551,41 @@ impl<'db> PythonFile {
             .with_needs_flow_analysis(
                 candidate.point.needs_flow_analysis() || definition_point.needs_flow_analysis(),
             );
-        let points = Points::from_binding_snapshot(candidate.snapshot.base.clone());
+        let binding_points = Points::from_binding_snapshot(candidate.snapshot.base.clone());
         for &(index, point) in &candidate.snapshot.changes {
-            points.set(index, point);
+            binding_points.set(index, point);
         }
-        points.set(candidate.name_index, changed_point);
+        binding_points.set(candidate.name_index, changed_point);
         let snapshot = Arc::new(
             candidate
                 .snapshot
                 .with_changed_point(candidate.name_index, changed_point),
         );
+        let (points, complex_points, replay_snapshot) =
+            if let Some(reuse) = candidate.flow_reuse.take() {
+                let points = reuse.points;
+                for index in reuse.tail_stmt_index..tree.length() as NodeIndex {
+                    points.set(index, binding_points.get(index));
+                }
+                points.set(0, Point::new_uncalculated());
+                (points, reuse.complex_points, Some(reuse.snapshot))
+            } else {
+                (
+                    binding_points,
+                    ComplexValues::from_binding_prefix(candidate.snapshot.complex_prefix.clone()),
+                    None,
+                )
+            };
         Ok(Self {
             tree,
             file_index,
             symbol_table: candidate.symbol_table,
             binding_snapshot: Some(snapshot),
+            tail_flow_snapshot: RwLock::new(replay_snapshot),
             standalone_module_references: candidate.standalone_module_references,
             maybe_dunder_all: OnceLock::default(),
             points,
-            complex_points: ComplexValues::from_binding_prefix(
-                candidate.snapshot.complex_prefix.clone(),
-            ),
+            complex_points,
             star_imports: Default::default(),
             all_imports: Default::default(),
             issues: Default::default(),
@@ -627,6 +698,7 @@ impl<'db> PythonFile {
             file_index,
             symbol_table: Arc::new(symbol_table),
             binding_snapshot: None,
+            tail_flow_snapshot: RwLock::new(None),
             standalone_module_references: standalone_module_references.into(),
             maybe_dunder_all: OnceLock::default(),
             points,

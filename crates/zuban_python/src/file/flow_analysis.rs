@@ -747,6 +747,15 @@ struct Frame {
     kind: FrameKind,
 }
 
+// The module frame immediately before a final bare-name expression. It has no
+// interior mutability, so an analyzed file can share it with its next version.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowSnapshot {
+    entries: Entries,
+    unreachable: bool,
+    reported_unreachable: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 struct NameEntryIndex {
     indexed_len: usize,
@@ -756,6 +765,15 @@ struct NameEntryIndex {
 }
 
 impl Frame {
+    fn from_snapshot(snapshot: &FlowSnapshot) -> Self {
+        Self {
+            entries: snapshot.entries.clone(),
+            initial_name_index: RefCell::new(None),
+            unreachable: snapshot.unreachable,
+            reported_unreachable: snapshot.reported_unreachable,
+            kind: FrameKind::BaseScope,
+        }
+    }
     fn ensure_name_index(&self) {
         let mut borrowed = self.initial_name_index.borrow_mut();
         let index = borrowed.get_or_insert_with(NameEntryIndex::default);
@@ -1061,6 +1079,27 @@ pub(crate) struct FlowAnalysis {
 }
 
 impl FlowAnalysis {
+    pub(crate) fn snapshot_module_frame(&self) -> Option<FlowSnapshot> {
+        if !self.try_frames.borrow().is_empty()
+            || self.loop_details.borrow().is_some()
+            || !self.partials_in_module.borrow().is_empty()
+            || self.in_type_checking_only_block.get()
+            || self.accumulating_types.get() != 0
+            || self.in_pattern_matching.get() != 0
+        {
+            return None;
+        }
+        let frames = self.frames.borrow();
+        let frame = frames.last()?;
+        if frames.len() != 1 || !matches!(frame.kind, FrameKind::BaseScope) {
+            return None;
+        }
+        Some(FlowSnapshot {
+            entries: frame.entries.clone(),
+            unreachable: frame.unreachable,
+            reported_unreachable: frame.reported_unreachable,
+        })
+    }
     pub(crate) fn add_delayed_func_with_reused_narrowings_for_nested_function(
         &self,
         func_node_ref: FuncNodeRef,
@@ -1507,7 +1546,22 @@ impl FlowAnalysis {
         i_s: &InferenceState,
         callable: impl FnOnce() -> T,
     ) -> T {
-        let (frame, result) = self.with_frame_and_result(Frame::new_base_scope(), callable);
+        self.with_frame_that_exports_widened_entries_from(i_s, None, callable)
+    }
+
+    pub(crate) fn with_frame_that_exports_widened_entries_from<T>(
+        &self,
+        i_s: &InferenceState,
+        snapshot: Option<&FlowSnapshot>,
+        callable: impl FnOnce() -> T,
+    ) -> T {
+        let frame = snapshot.map_or_else(Frame::new_base_scope, Frame::from_snapshot);
+        let (frame, result) = self.with_frame_and_result(frame, callable);
+        if snapshot.is_some() {
+            // The only replayed statement is a final bare-name read. The old
+            // file already exported these widened entries into copied points.
+            return result;
+        }
         for entry in frame.entries {
             if entry.widens
                 && let EntryKind::Type(widened) = entry.type_

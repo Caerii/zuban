@@ -160,13 +160,20 @@ impl Inference<'_, '_, '_> {
                 );
                 debug_assert!(self.i_s.is_file_context(), "{:?}", self.i_s);
                 let indent = debug_indent();
-                flow_analysis.with_frame_that_exports_widened_entries(self.i_s, || {
-                    self.calc_stmts_diagnostics(
-                        self.file.tree.root().iter_stmt_likes(),
-                        None,
-                        None,
-                    );
-                });
+                let tail_stmt_index = self.file.bare_tail_name_stmt().map(|(index, _)| index);
+                let replay_snapshot = self.file.tail_flow_snapshot.read().unwrap().clone();
+                flow_analysis.with_frame_that_exports_widened_entries_from(
+                    self.i_s,
+                    replay_snapshot.as_deref(),
+                    || {
+                        self.calc_stmts_diagnostics(
+                            self.file.tree.root().iter_stmt_likes(),
+                            None,
+                            None,
+                            tail_stmt_index,
+                        );
+                    },
+                );
                 drop(indent);
                 debug!(
                     "End of global symbol analysis for module {file_path} ({})",
@@ -393,8 +400,14 @@ impl Inference<'_, '_, '_> {
         stmts: StmtLikeIterator,
         class: Option<Class>,
         func: Option<&Function>,
+        capture_before: Option<NodeIndex>,
     ) {
         for stmt_like in stmts {
+            if capture_before == Some(stmt_like.parent_index) {
+                *self.file.tail_flow_snapshot.write().unwrap() = FLOW_ANALYSIS
+                    .with(|flow_analysis| flow_analysis.snapshot_module_frame())
+                    .map(Arc::new);
+            }
             let point = self.point(stmt_like.parent_index);
             if point.calculated() {
                 debug_assert_eq!(point.specific(), Specific::Analyzed);
@@ -542,7 +555,7 @@ impl Inference<'_, '_, '_> {
             StmtLikeContent::BrokenScope(broken) => {
                 // For now process these as part of the current scope, since this is part of
                 // the parser's error recovery
-                self.calc_stmts_diagnostics(broken.iter_stmt_likes(), class, func)
+                self.calc_stmts_diagnostics(broken.iter_stmt_likes(), class, func, None)
             }
             StmtLikeContent::Error(_) | StmtLikeContent::Newline => {}
         };
@@ -884,7 +897,7 @@ impl Inference<'_, '_, '_> {
         class: Option<Class>,
         func: Option<&Function>,
     ) {
-        self.calc_stmts_diagnostics(block.iter_stmt_likes(), class, func)
+        self.calc_stmts_diagnostics(block.iter_stmt_likes(), class, func, None)
     }
 
     pub fn calculate_class_block_diagnostics(&self, c: Class, block: Block) -> Result<(), ()> {

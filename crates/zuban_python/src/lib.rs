@@ -1172,6 +1172,9 @@ mod lsp_edit_tests {
             .unwrap();
         let new_file = project.db.loaded_python_file(index);
         assert!(Arc::ptr_eq(&old_symbols, &new_file.symbol_table));
+        let first_stmt = new_file.tree.root().iter_stmt_likes().next().unwrap();
+        assert!(new_file.points.get(first_stmt.parent_index).calculated());
+        assert!(!new_file.points.get(0).calculated());
         let mut updated = code;
         updated.replace_range(start..start + current.len(), replacement);
         let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
@@ -1500,7 +1503,7 @@ mod lsp_edit_tests {
             string_else in any::<bool>(),
             omit_last_else in any::<bool>(),
             bare_tail in any::<bool>(),
-            edits in prop::collection::vec((0usize..3, 0usize..4), 2..5),
+            edits in prop::collection::vec((0usize..3, 0usize..5), 2..5),
         ) {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
@@ -1530,6 +1533,7 @@ mod lsp_edit_tests {
             let first_reference_line = code.bytes().filter(|&byte| byte == b'\n').count();
             let first_reference_start = code.len();
             let initial = format!("name_{}", branch_count - 1);
+            let previous_name = format!("name_{}", branch_count - 2);
             let mut references = [initial.as_str(); 3];
             for _ in 0..references.len() {
                 if bare_tail {
@@ -1551,13 +1555,22 @@ mod lsp_edit_tests {
             let _ = project.document(&path).unwrap().diagnostics();
             let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
 
+            let mut edits = edits;
+            if bare_tail {
+                // Start with an eligible edit to the final statement, so the
+                // property test always exercises replay in these cases.
+                edits[0] = (2, 4);
+                edits[1] = (2, 0);
+            }
+
             for (step, (slot, replacement_kind)) in edits.into_iter().enumerate() {
                 let previous = references[slot];
                 let replacement = match replacement_kind {
                     0 => initial.as_str(),
                     1 => "name_0",
                     2 => "missing_name",
-                    _ => "box",
+                    3 => "box",
+                    _ => previous_name.as_str(),
                 };
                 let line = first_reference_line + slot;
                 let start = code.lines().take(line).map(|line| line.len() + 1).sum::<usize>();
@@ -1578,6 +1591,12 @@ mod lsp_edit_tests {
                         column: pos.character as usize,
                     },
                 ).unwrap();
+                if bare_tail && !omit_last_else && step < 2 {
+                    let file_index = project.db.vfs.in_memory_file(&path).unwrap();
+                    let file = project.db.loaded_python_file(file_index);
+                    let first_stmt = file.tree.root().iter_stmt_likes().next().unwrap();
+                    prop_assert!(file.points.get(first_stmt.parent_index).calculated());
+                }
 
                 // A distinct oracle file prevents reuse of its previous analysis state.
                 let fresh_path = PathWithScheme::with_file_scheme(
