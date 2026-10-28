@@ -105,7 +105,7 @@ pub(crate) struct PythonFile {
     // Finished during binding; clones can share the names and their backing source text.
     pub symbol_table: Arc<SymbolTable>,
     binding_snapshot: Option<Arc<BindingSnapshot>>,
-    has_standalone_module_reference: bool,
+    standalone_module_references: Arc<[NodeIndex]>,
     maybe_dunder_all: OnceLock<Option<DunderAllState>>, // For __all__
     pub points: Points,
     pub complex_points: ComplexValues,
@@ -127,6 +127,7 @@ pub(crate) struct ReferenceBindingCandidate {
     file_index: FileIndex,
     snapshot: Arc<BindingSnapshot>,
     symbol_table: Arc<SymbolTable>,
+    standalone_module_references: Arc<[NodeIndex]>,
     name_index: NodeIndex,
     point: Point,
     start: usize,
@@ -222,7 +223,7 @@ impl Clone for PythonFile {
             tree: self.tree.clone(),
             symbol_table: self.symbol_table.clone(),
             binding_snapshot: self.binding_snapshot.clone(),
-            has_standalone_module_reference: self.has_standalone_module_reference,
+            standalone_module_references: self.standalone_module_references.clone(),
             maybe_dunder_all: self.maybe_dunder_all.clone(),
             points: self.points.clone(),
             complex_points: self.complex_points.clone(),
@@ -354,7 +355,7 @@ impl fmt::Debug for PythonFile {
 impl<'db> PythonFile {
     pub fn capture_binding_snapshot(&mut self) {
         if self.binding_snapshot.is_some()
-            || !self.has_standalone_module_reference
+            || self.standalone_module_references.is_empty()
             || self.tree.length() < 4_096
             || self.super_file.is_some()
             || !self.complex_points.0.is_empty()
@@ -382,12 +383,11 @@ impl<'db> PythonFile {
         {
             return None;
         }
-        let (_, GotoNode::Name(name)) = self.tree.goto_node(start.try_into().ok()?) else {
-            return None;
-        };
-        if name.start() as usize != start
-            || name.end() as usize != end
-            || !name.is_standalone_module_expression()
+        let name = self.tree.name_at_exact_position(start, end)?;
+        if self
+            .standalone_module_references
+            .binary_search(&name.index())
+            .is_err()
         {
             return None;
         }
@@ -410,6 +410,7 @@ impl<'db> PythonFile {
             file_index: self.file_index,
             snapshot: snapshot.clone(),
             symbol_table: self.symbol_table.clone(),
+            standalone_module_references: self.standalone_module_references.clone(),
             name_index: name.index(),
             point,
             start,
@@ -425,14 +426,14 @@ impl<'db> PythonFile {
         tree: Tree,
         candidate: ReferenceBindingCandidate,
     ) -> Result<Self, Tree> {
-        let (_, GotoNode::Name(name)) = tree.goto_node(candidate.start as CodeIndex) else {
-            return Err(tree);
-        };
+        let name = Name::by_index(&tree, candidate.name_index);
         if file_index != candidate.file_index
-            || name.index() != candidate.name_index
             || name.start() as usize != candidate.start
             || name.end() as usize != candidate.end
-            || !name.is_standalone_module_expression()
+            || candidate
+                .standalone_module_references
+                .binary_search(&candidate.name_index)
+                .is_err()
         {
             return Err(tree);
         }
@@ -460,7 +461,7 @@ impl<'db> PythonFile {
             file_index,
             symbol_table: candidate.symbol_table,
             binding_snapshot: Some(snapshot),
-            has_standalone_module_reference: true,
+            standalone_module_references: candidate.standalone_module_references,
             maybe_dunder_all: OnceLock::default(),
             points,
             complex_points: Default::default(),
@@ -555,7 +556,7 @@ impl<'db> PythonFile {
         let complex_points = Default::default();
         let star_imports: RefCell<Vec<StarImport>> = Default::default();
         let all_imports: RefCell<Vec<FileImport>> = Default::default();
-        let (symbol_table, has_standalone_module_reference) = NameBinder::with_global_binder(
+        let (symbol_table, standalone_module_references) = NameBinder::with_global_binder(
             DbInfos {
                 // TODO this does not use flags of the super file. Is this an issue?
                 settings: &project.settings,
@@ -576,7 +577,7 @@ impl<'db> PythonFile {
             file_index,
             symbol_table: Arc::new(symbol_table),
             binding_snapshot: None,
-            has_standalone_module_reference,
+            standalone_module_references: standalone_module_references.into(),
             maybe_dunder_all: OnceLock::default(),
             points,
             complex_points,

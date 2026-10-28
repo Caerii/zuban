@@ -705,6 +705,7 @@ mod lsp_edit_tests {
     };
 
     use lsp_types::{Range, TextDocumentContentChangeEvent};
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -861,7 +862,7 @@ mod lsp_edit_tests {
         for index in 0..1_000 {
             code.push_str(&format!("name_{index} = {index}\n"));
         }
-        code.push_str("alpha\n");
+        code.push_str("alpha\nalpha\n");
         let start = code.len() - "alpha\n".len();
         project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
         let index = project.db.vfs.in_memory_file(&path).unwrap();
@@ -873,6 +874,13 @@ mod lsp_edit_tests {
                 .reference_binding_candidate(start, start + 5)
                 .is_some()
         );
+        assert!(
+            project
+                .db
+                .loaded_python_file(index)
+                .reference_binding_candidate(start - 6, start - 1)
+                .is_some()
+        );
 
         for (replacement, should_reuse) in [("delta", true), ("alpha", true), ("omega", false)] {
             let previous_table = project.db.loaded_python_file(index).symbol_table.clone();
@@ -880,7 +888,7 @@ mod lsp_edit_tests {
                 .store_file_with_lsp_changes(
                     path.clone(),
                     vec![TextDocumentContentChangeEvent {
-                        range: Some(Range::new(Position::new(1_002, 0), Position::new(1_002, 5))),
+                        range: Some(Range::new(Position::new(1_003, 0), Position::new(1_003, 5))),
                         range_length: None,
                         text: replacement.into(),
                     }],
@@ -918,6 +926,84 @@ mod lsp_edit_tests {
                 project.document(&path).unwrap().diagnostics().len(),
                 fresh.document(&path).unwrap().diagnostics().len()
             );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn incremental_name_edit_matches_fresh_binding(
+            preceding_references in 0usize..4,
+            body_kind in 0usize..6,
+            replacement_kind in 0usize..4,
+            repeated_delta in any::<bool>(),
+        ) {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-reference-binding.py")),
+            );
+
+            let mut code = String::from("alpha = 1\ndelta = 2\n");
+            for index in 0..700 {
+                code.push_str(&format!("name_{index} = {index}\n"));
+            }
+            if repeated_delta {
+                code.push_str("delta = 3\n");
+            }
+            for _ in 0..preceding_references {
+                code.push_str("alpha\n");
+            }
+            let (before_reference, reference_line, column) = match body_kind {
+                0 => ("", "alpha\n", 0),
+                1 => ("", "alpha + 0\n", 0),
+                2 => ("", "alpha # note\n", 0),
+                3 => ("if True:\n", "    alpha\n", 4),
+                4 => ("", "(alpha)\n", 1),
+                _ => ("def f():\n", "    alpha\n", 4),
+            };
+            code.push_str(before_reference);
+            let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
+            let start = code.len() + column;
+            code.push_str(reference_line);
+            let replacement = ["alpha", "delta", "omega", "bravo"][replacement_kind];
+            let mut updated = code.clone();
+            updated.replace_range(start..start + 5, replacement);
+
+            project.store_in_memory_file(path.clone(), code.into_boxed_str());
+            project.store_file_with_lsp_changes(
+                path.clone(),
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(
+                        Position::new(line, column as u32),
+                        Position::new(line, column as u32 + 5),
+                    )),
+                    range_length: None,
+                    text: replacement.into(),
+                }],
+                |pos| InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            ).unwrap();
+            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+            fresh.store_in_memory_file(path.clone(), updated.clone().into_boxed_str());
+
+            let actual_index = project.db.vfs.in_memory_file(&path).unwrap();
+            let expected_index = fresh.db.vfs.in_memory_file(&path).unwrap();
+            let actual = project.db.loaded_python_file(actual_index);
+            let expected = fresh.db.loaded_python_file(expected_index);
+            prop_assert_eq!(actual.tree.code(), updated.as_str());
+            prop_assert_eq!(actual.tree.length(), expected.tree.length());
+            let mismatch = actual.points.iter().zip(expected.points.iter())
+                .position(|(left, right)| left != right);
+            prop_assert!(mismatch.is_none(), "binding point mismatch at {mismatch:?}");
+            let actual_diagnostics = format!("{:?}", project.document(&path).unwrap().diagnostics());
+            let expected_diagnostics = format!("{:?}", fresh.document(&path).unwrap().diagnostics());
+            prop_assert_eq!(actual_diagnostics, expected_diagnostics);
         }
     }
 

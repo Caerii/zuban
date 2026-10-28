@@ -89,7 +89,7 @@ pub(crate) struct NameBinder<'db> {
     unsaved_classes: Vec<UnsavedClass<'db>>,
     annotation_names: Vec<AnnotationName<'db>>,
     following_nodes_need_flow_analysis: bool,
-    has_standalone_module_reference: bool,
+    standalone_module_references: Vec<NodeIndex>,
     latest_return_or_yield: NodeIndex,
     parent: Option<*mut NameBinder<'db>>,
 }
@@ -113,7 +113,7 @@ impl<'db> NameBinder<'db> {
             unsaved_classes: vec![],
             annotation_names: vec![],
             following_nodes_need_flow_analysis: false,
-            has_standalone_module_reference: false,
+            standalone_module_references: Vec::new(),
             latest_return_or_yield: 0,
             parent,
         }
@@ -122,7 +122,7 @@ impl<'db> NameBinder<'db> {
     pub(crate) fn with_global_binder(
         db_infos: DbInfos<'db>,
         func: impl FnOnce(&mut NameBinder<'db>),
-    ) -> (SymbolTable, bool) {
+    ) -> (SymbolTable, Vec<NodeIndex>) {
         let mut binder = Self::new(db_infos, NameBinderKind::Global, 0, None);
         func(&mut binder);
         binder.close();
@@ -161,7 +161,9 @@ impl<'db> NameBinder<'db> {
             |_| (),
         );
 
-        (binder.symbol_table, binder.has_standalone_module_reference)
+        binder.standalone_module_references.sort_unstable();
+        binder.standalone_module_references.dedup();
+        (binder.symbol_table, binder.standalone_module_references)
     }
 
     fn with_nested(
@@ -485,14 +487,12 @@ impl<'db> NameBinder<'db> {
                 }
                 StmtLikeContent::StarExpressions(s) => {
                     if matches!(self.kind, NameBinderKind::Global)
-                        && !self.has_standalone_module_reference
-                        && s.maybe_simple_expression()
+                        && let Some(AtomContent::Name(name)) = s
+                            .maybe_simple_expression()
                             .and_then(|expr| expr.maybe_unpacked_atom())
-                            .is_some_and(|atom| {
-                                matches!(atom, AtomContent::Name(name) if name.is_standalone_module_expression())
-                            })
+                        && s.as_code() == name.as_str()
                     {
-                        self.has_standalone_module_reference = true;
+                        self.standalone_module_references.push(name.index());
                     }
                     self.index_non_block_node(&s, ordered)
                 }

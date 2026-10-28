@@ -170,6 +170,14 @@ impl Tree {
         self.0.as_code()
     }
 
+    pub fn name_at_exact_position(&self, start: usize, end: usize) -> Option<Name<'_>> {
+        let leaf = self.0.leaf_by_position(start.try_into().ok()?);
+        (leaf.is_type(Terminal(TerminalType::Name))
+            && leaf.start() as usize == start
+            && leaf.end() as usize == end)
+            .then(|| Name::new(leaf))
+    }
+
     pub fn source_owner(&self) -> SourceOwner {
         SourceOwner(self.0.clone())
     }

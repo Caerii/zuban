@@ -38,6 +38,7 @@ cli_args.workspace = true
 test_utils.workspace = true
 logging_config.workspace = true
 shlex = "*"
+proptest = "1"
 
 [features]
 zuban_debug = []
