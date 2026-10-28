@@ -1692,8 +1692,13 @@ impl Database {
         parent: Option<FileIndex>,
         syntax_candidate: Option<SyntaxReuseCandidate>,
     ) {
-        let invalidation =
-            self.store_in_memory_file_without_db_invalidation(path, code, parent, syntax_candidate);
+        let invalidation = self.store_in_memory_file_without_db_invalidation(
+            path,
+            code,
+            parent,
+            syntax_candidate,
+            None,
+        );
         self.handle_invalidation(invalidation);
     }
 
@@ -1701,7 +1706,25 @@ impl Database {
         let mut invalidation = InvalidationResult::InvalidatedFiles;
         for (path, code) in files {
             invalidation |=
-                self.store_in_memory_file_without_db_invalidation(path, code, None, None);
+                self.store_in_memory_file_without_db_invalidation(path, code, None, None, None);
+        }
+        self.handle_invalidation(invalidation);
+    }
+
+    pub fn store_in_memory_files_preparsed_for_tests(
+        &mut self,
+        files: Vec<(PathWithScheme, Tree)>,
+    ) {
+        let mut invalidation = InvalidationResult::InvalidatedFiles;
+        for (path, tree) in files {
+            let code = tree.code().into();
+            invalidation |= self.store_in_memory_file_without_db_invalidation(
+                path,
+                code,
+                None,
+                None,
+                Some(tree),
+            );
         }
         self.handle_invalidation(invalidation);
     }
@@ -1712,7 +1735,9 @@ impl Database {
         code: Box<str>,
         parent: Option<FileIndex>,
         syntax_candidate: Option<SyntaxReuseCandidate>,
+        preparsed_tree: Option<Tree>,
     ) -> InvalidationResult {
+        debug_assert!(syntax_candidate.is_none() || preparsed_tree.is_none());
         if parent.is_none()
             && let Some(index) = self.vfs.unchanged_in_memory_file(&path, &code)
             && self
@@ -1815,6 +1840,12 @@ impl Database {
                             code,
                         ),
                     }
+                } else if let Some(tree) = preparsed_tree {
+                    assert!(
+                        tree.code() == &*new_code,
+                        "preparsed syntax must match the stored source"
+                    );
+                    PythonFile::new(&self.project, file_index, file_entry, tree)
                 } else {
                     PythonFile::from_file_entry_and_code(
                         &self.project,

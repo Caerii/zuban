@@ -19,6 +19,7 @@ use config::{
     TypeCheckerFlags,
 };
 use ide::find_and_check_ide_tests;
+use parsa_python_cst::Tree;
 use regex::{Captures, Regex, Replacer};
 use test_utils::{Step, Steps, calculate_steps};
 use utils::{FastHashMap, FastHashSet};
@@ -224,6 +225,7 @@ struct TestCase<'name, 'code> {
     code: &'code str,
     from_mypy_test_suite: bool,
     steps: OnceCell<Steps<'code>>,
+    parsed_files: OnceCell<Vec<Vec<(&'code str, Tree)>>>,
 }
 
 #[derive(Default)]
@@ -232,6 +234,10 @@ struct PhaseTimings {
     project_setup: Duration,
     fixture: Duration,
     ide: Duration,
+    wanted: Duration,
+    inline_errors: Duration,
+    file_store: Duration,
+    wanted_normalization: Duration,
     diagnostics: Duration,
     comparison: Duration,
     cleanup: Duration,
@@ -518,6 +524,24 @@ impl TestCase<'_, '_> {
             return Ok(false);
         }
         let _current_test = CurrentTestGuard::new(&self.name, self.file_name);
+        let parsed_files = self.parsed_files.get_or_init(|| {
+            steps
+                .iter()
+                .map(|step| {
+                    let mut files: Vec<_> = step
+                        .files
+                        .iter()
+                        .filter(|(path, _)| {
+                            !["mypy.ini", "pyproject.toml"].contains(path)
+                                && !path.starts_with("../")
+                        })
+                        .map(|(&path, &code)| (path, Tree::parse(code.into())))
+                        .collect();
+                    files.sort_by_key(|(path, _)| *path);
+                    files
+                })
+                .collect::<Vec<_>>()
+        });
         let local_fs = SimpleLocalFS::without_watcher();
         let no_typecheck = flags.no_typecheck;
         // Flag-bearing cases with the same effective fixture settings can share the resolved
@@ -567,7 +591,7 @@ impl TestCase<'_, '_> {
         if let Some(start) = setup_start {
             PHASE_TIMINGS.with_borrow_mut(|times| times.setup += start.elapsed());
         }
-        for (i, step) in steps.iter().enumerate() {
+        for (i, (step, parsed_files)) in steps.iter().zip(parsed_files).enumerate() {
             if cfg!(feature = "zuban_debug") {
                 println!(
                     "\nTest: {}: Step {}/{}",
@@ -581,6 +605,7 @@ impl TestCase<'_, '_> {
                 &local_fs,
                 project,
                 step,
+                parsed_files,
                 self.from_mypy_test_suite,
             );
             let mut ide_test_results: Vec<String> = vec![];
@@ -856,8 +881,11 @@ fn initialize_and_return_wanted_output(
     local_fs: &SimpleLocalFS,
     project: &mut Project,
     step: &Step,
+    parsed_files: &[(&str, Tree)],
     from_mypy_test_suite: bool,
 ) -> Vec<String> {
+    let profile = profile_phases();
+    let wanted_start = profile.then(Instant::now);
     let mut wanted = step
         .out
         .trim()
@@ -877,36 +905,56 @@ fn initialize_and_return_wanted_output(
     if wanted == [""] {
         wanted.pop();
     }
+    let wanted_duration = wanted_start.map_or(Duration::ZERO, |start| start.elapsed());
 
-    let mut sorted_files: Vec<_> = step.files.iter().collect();
-    sorted_files.sort();
     let mut independent_files = Vec::new();
-    for &(&path, &code) in &sorted_files {
-        // ../ files are usually Mypy internals
-        if ["mypy.ini", "pyproject.toml"].contains(&path) || path.starts_with("../") {
-            continue;
-        }
+    let mut inline_duration = Duration::ZERO;
+    let mut store_duration = Duration::ZERO;
+    for &(path, ref tree) in parsed_files {
+        let code = tree.code();
         let p = if path == "__main__.py" {
             "__main__"
         } else {
             path
         };
+        let inline_start = profile.then(Instant::now);
         add_inline_errors(&mut wanted, p, code, from_mypy_test_suite);
+        if let Some(start) = inline_start {
+            inline_duration += start.elapsed();
+        }
         // testAbstractClassSubclasses
         let p = base_path_join(local_fs, path);
         if let Some(parent) = maybe_parent(local_fs, code) {
-            project.store_in_memory_files(std::mem::take(&mut independent_files));
+            let store_start = profile.then(Instant::now);
+            project
+                .store_in_memory_files_preparsed_for_tests(std::mem::take(&mut independent_files));
             project
                 .store_in_memory_file_with_parent(p, code.into(), &parent)
                 .unwrap();
+            if let Some(start) = store_start {
+                store_duration += start.elapsed();
+            }
         } else {
-            independent_files.push((p, code.into()));
+            independent_files.push((p, tree.clone()));
         }
     }
-    project.store_in_memory_files(independent_files);
+    let store_start = profile.then(Instant::now);
+    project.store_in_memory_files_preparsed_for_tests(independent_files);
+    if let Some(start) = store_start {
+        store_duration += start.elapsed();
+    }
+    let normalize_start = profile.then(Instant::now);
     for line in &mut wanted {
         replace_unions(line);
         replace_optional(line);
+    }
+    if let Some(start) = normalize_start {
+        PHASE_TIMINGS.with_borrow_mut(|times| {
+            times.wanted += wanted_duration;
+            times.inline_errors += inline_duration;
+            times.file_store += store_duration;
+            times.wanted_normalization += start.elapsed();
+        });
     }
     wanted
 }
@@ -1400,6 +1448,13 @@ fn run(
                 times.project_fresh.as_secs_f64(),
                 times.project_fresh_count,
             );
+            println!(
+                "Fixture detail (s): wanted={:.3} inline={:.3} store={:.3} normalize={:.3}",
+                times.wanted.as_secs_f64(),
+                times.inline_errors.as_secs_f64(),
+                times.file_store.as_secs_f64(),
+                times.wanted_normalization.as_secs_f64(),
+            );
         });
     }
     error_count
@@ -1419,6 +1474,7 @@ fn mypy_style_cases<'a, 'b>(
             code: &code[start..end],
             from_mypy_test_suite,
             steps: OnceCell::new(),
+            parsed_files: OnceCell::new(),
         });
     };
 

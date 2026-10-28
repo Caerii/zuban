@@ -140,6 +140,15 @@ impl Project {
         self.db.store_in_memory_files(files);
     }
 
+    /// Rebinds shared immutable syntax into independent test projects.
+    /// Every project still computes its own types and diagnostics.
+    pub fn store_in_memory_files_preparsed_for_tests(
+        &mut self,
+        files: Vec<(PathWithScheme, Tree)>,
+    ) {
+        self.db.store_in_memory_files_preparsed_for_tests(files);
+    }
+
     pub fn store_file_with_lsp_changes(
         &mut self,
         path: PathWithScheme,
