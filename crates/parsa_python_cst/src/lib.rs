@@ -182,13 +182,16 @@ impl Tree {
 
     pub fn mypy_inline_config_directives(&self) -> impl Iterator<Item = (CodeIndex, &str)> {
         const PREFIX: &str = "# mypy: ";
-        let mut code_index_start = 0;
-        self.code().split('\n').filter_map(move |line| {
-            let result = line
-                .strip_prefix(PREFIX)
-                .map(|rest| (code_index_start + PREFIX.len() as CodeIndex, rest));
-            code_index_start += line.len() as CodeIndex + 1;
-            result
+        let code = self.code();
+        code.match_indices(PREFIX).filter_map(move |(start, _)| {
+            if start != 0 && code.as_bytes()[start - 1] != b'\n' {
+                return None;
+            }
+            let rest_start = start + PREFIX.len();
+            let rest_end = code[rest_start..]
+                .find('\n')
+                .map_or(code.len(), |offset| rest_start + offset);
+            Some((rest_start as CodeIndex, &code[rest_start..rest_end]))
         })
     }
 
@@ -5397,4 +5400,30 @@ pub enum UnpackedError<'db> {
     CaseBlock(CaseBlock<'db>),
     SimpleStmt(SimpleStmt<'db>),
     NonBlockErrorPart(NonBlockErrorPart<'db>),
+}
+
+#[cfg(test)]
+mod directive_tests {
+    use super::*;
+
+    #[test]
+    fn mypy_directives_require_line_start_and_keep_byte_positions() {
+        let code = "# mypy: first\nπ = '# mypy: ignored'\n # mypy: indented\n# mypy: second\r\n# mypy: third";
+        let tree = Tree::parse(code.into());
+        let directives = tree.mypy_inline_config_directives().collect::<Vec<_>>();
+        assert_eq!(
+            directives,
+            vec![
+                ("# mypy: ".len() as CodeIndex, "first"),
+                (
+                    (code.find("# mypy: second").unwrap() + "# mypy: ".len()) as CodeIndex,
+                    "second\r"
+                ),
+                (
+                    (code.find("# mypy: third").unwrap() + "# mypy: ".len()) as CodeIndex,
+                    "third"
+                ),
+            ]
+        );
+    }
 }

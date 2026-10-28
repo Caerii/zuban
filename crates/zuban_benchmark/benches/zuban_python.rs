@@ -385,6 +385,10 @@ fn bench_type_checking(c: &mut Criterion) {
     c.bench_function("parse edited small file", |b| {
         b.iter(|| std::hint::black_box(Tree::parse(small_code.clone())))
     });
+    let many_lines = Tree::parse("x = 1\n".repeat(10_000).into_boxed_str());
+    c.bench_function("scan 10000 lines for mypy directives", |b| {
+        b.iter(|| std::hint::black_box(many_lines.mypy_inline_config_directives().count()))
+    });
     let assignments = (0..100)
         .map(|i| format!("x{i} = {i}\n"))
         .collect::<Vec<_>>()
