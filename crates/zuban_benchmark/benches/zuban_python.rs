@@ -303,43 +303,66 @@ fn bench_large_reference_lsp_edit(c: &mut Criterion, standalone: bool, diagnosti
     });
 }
 
-fn bench_dependency_chain_reference_edit(c: &mut Criterion) {
+fn bench_dependency_chain_reference_edit(c: &mut Criterion, source_edit: bool) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
-    let mut code = String::from("alpha = 1\ndelta = 2\nname_0 = 0\n");
+    let mut code = if source_edit {
+        String::from("alpha = 1\ndelta = 'x'\nname_0 = alpha\n")
+    } else {
+        String::from("alpha = 1\ndelta = 2\nname_0 = 0\n")
+    };
     for index in 1..4_000 {
         code.push_str(&format!("name_{index} = name_{}\n", index - 1));
     }
-    code.push_str("alpha\n");
+    code.push_str(if source_edit {
+        "name_3999 + 1\n"
+    } else {
+        "alpha\n"
+    });
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
     let mut use_delta = false;
-    c.bench_function(
-        "reference edit and diagnostics in 4k-name dependency chain",
-        |b| {
-            b.iter(|| {
-                let replacement = if use_delta { "alpha" } else { "delta" };
-                project
-                    .store_file_with_lsp_changes(
-                        path.clone(),
-                        vec![TextDocumentContentChangeEvent {
-                            range: Some(Range::new(
-                                Position::new(4_002, 0),
-                                Position::new(4_002, 5),
-                            )),
-                            range_length: None,
-                            text: replacement.into(),
-                        }],
-                        |pos| InputPosition::Utf16CodeUnits {
-                            line: pos.line as usize,
-                            column: pos.character as usize,
-                        },
-                    )
-                    .unwrap();
-                use_delta = !use_delta;
-                std::hint::black_box(project.document(&path).unwrap().diagnostics());
-            })
-        },
-    );
+    let (name, line, start_column) = if source_edit {
+        (
+            "source edit and diagnostics in 4k-name dependency chain",
+            2,
+            9,
+        )
+    } else {
+        (
+            "reference edit and diagnostics in 4k-name dependency chain",
+            4_002,
+            0,
+        )
+    };
+    c.bench_function(name, |b| {
+        b.iter(|| {
+            let replacement = if use_delta { "alpha" } else { "delta" };
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(line, start_column),
+                            Position::new(line, start_column + 5),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            use_delta = !use_delta;
+            let mut document = project.document(&path).unwrap();
+            let diagnostics = document.diagnostics();
+            if source_edit {
+                assert_eq!(diagnostics.len(), usize::from(use_delta));
+            }
+            std::hint::black_box(diagnostics);
+        })
+    });
 }
 
 fn bench_length_changing_lsp_edit(c: &mut Criterion, name: &str, code: String) {
@@ -718,7 +741,8 @@ fn bench_type_checking(c: &mut Criterion) {
     );
     bench_large_reference_lsp_edit(c, true, false);
     bench_large_reference_lsp_edit(c, true, true);
-    bench_dependency_chain_reference_edit(c);
+    bench_dependency_chain_reference_edit(c, false);
+    bench_dependency_chain_reference_edit(c, true);
     bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,
