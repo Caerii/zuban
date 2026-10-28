@@ -410,7 +410,7 @@ impl<F: VfsFile> Vfs<F> {
         }
     }
 
-    pub fn in_memory_file(&mut self, path: &PathWithScheme) -> Option<FileIndex> {
+    pub fn in_memory_file(&self, path: &PathWithScheme) -> Option<FileIndex> {
         match self.in_memory_files.get(path)? {
             InMemoryKind::File(file_index) => Some(*file_index),
             InMemoryKind::Gitignore(_) => None,

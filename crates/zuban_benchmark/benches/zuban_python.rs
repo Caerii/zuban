@@ -409,6 +409,16 @@ fn bench_type_checking(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    let (mut unchanged_project, unchanged_paths) = prepare_independent_files(1000);
+    check_prepared_files(&mut unchanged_project, unchanged_paths.clone());
+    c.bench_function("recheck 1000 unchanged prepared files", |b| {
+        b.iter(|| {
+            for path in &unchanged_paths {
+                let mut document = unchanged_project.document(path).unwrap();
+                std::hint::black_box(document.diagnostics());
+            }
+        })
+    });
     let (mut project, paths) = prepare_independent_files(1000);
     check_prepared_files(&mut project, paths.clone());
     let edited_path = paths[0].clone();

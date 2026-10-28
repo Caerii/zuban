@@ -1359,6 +1359,10 @@ impl Database {
     }
 
     pub fn file_by_file_path(&self, path: &PathWithScheme) -> Option<FileIndex> {
+        // Open editor buffers already have a direct path-to-file mapping.
+        if let Some(file_index) = self.vfs.in_memory_file(path) {
+            return Some(file_index);
+        }
         let DirOrFile::File(file_entry) = self
             .vfs
             .search_path(self.project.flags.case_sensitive, path)?
