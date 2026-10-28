@@ -929,6 +929,41 @@ mod lsp_edit_tests {
         }
     }
 
+    #[test]
+    fn dependency_invalidation_revokes_reference_binding_snapshot() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/invalidated-reference-binding.py")),
+        );
+        let mut code = String::from("alpha = 1\n");
+        for index in 0..700 {
+            code.push_str(&format!("name_{index} = {index}\n"));
+        }
+        code.push_str("alpha\n");
+        let start = code.len() - 6;
+        project.store_in_memory_file(path.clone(), code.into_boxed_str());
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        assert!(
+            project
+                .db
+                .loaded_python_file(index)
+                .reference_binding_candidate(start, start + 5)
+                .is_some()
+        );
+        vfs::VfsFile::invalidate_references_to(project.db.vfs.file_mut(index).unwrap(), None);
+        assert!(
+            project
+                .db
+                .loaded_python_file(index)
+                .reference_binding_candidate(start, start + 5)
+                .is_none()
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
         #[test]

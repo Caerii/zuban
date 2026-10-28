@@ -323,6 +323,9 @@ impl vfs::VfsFile for PythonFile {
             "Invalidating references to {file_index:?} from {:?}",
             self.file_index
         );
+        // The snapshot predates this dependency change and cannot be reused
+        // to reconstruct the next in-memory version.
+        self.binding_snapshot = None;
         self.points.invalidate_references_to(file_index);
         self.issues.invalidate_non_name_binder_issues();
         if let Some(cache) = self.stub_cache.as_mut() {
@@ -446,7 +449,7 @@ impl<'db> PythonFile {
             return Err(tree);
         }
         let changed_point = candidate.point.with_changed_node_index(definition);
-        let points = Points::from_binding_snapshot(&candidate.snapshot.base);
+        let points = Points::from_binding_snapshot(candidate.snapshot.base.clone());
         for &(index, point) in &candidate.snapshot.changes {
             points.set(index, point);
         }
@@ -661,11 +664,13 @@ impl<'db> PythonFile {
     }
 
     pub fn ensure_calculated_diagnostics(&self, db: &Database) -> Result<(), ()> {
+        self.points.materialize_for_inference();
         self.inference(&InferenceState::new(db, self))
             .calculate_module_diagnostics()
     }
 
     pub fn ensure_module_symbols_flow_analysis(&self, db: &Database) -> Result<(), ()> {
+        self.points.materialize_for_inference();
         self.inference(&InferenceState::new(db, self))
             .ensure_module_symbols_flow_analysis()
     }

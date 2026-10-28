@@ -399,8 +399,46 @@ impl fmt::Debug for Point {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Points(Vec<Cell<Point>>);
+#[derive(Debug, Default)]
+pub(crate) struct Points(PointsStorage);
+
+#[derive(Debug, Default)]
+enum PointsStorage {
+    #[default]
+    Empty,
+    Dense(Vec<Cell<Point>>),
+    Shared {
+        base: Arc<[Point]>,
+        // Inference may write points after binding. Those writes belong to this
+        // file version, while the binding snapshot remains immutable.
+        changes: RwLock<HashMap<NodeIndex, Point>>,
+        materialized: OnceLock<Vec<Cell<Point>>>,
+    },
+}
+
+impl Clone for Points {
+    fn clone(&self) -> Self {
+        Self(match &self.0 {
+            PointsStorage::Empty => PointsStorage::Empty,
+            PointsStorage::Dense(points) => PointsStorage::Dense(points.clone()),
+            PointsStorage::Shared {
+                base,
+                changes,
+                materialized,
+            } => {
+                if let Some(points) = materialized.get() {
+                    PointsStorage::Dense(points.clone())
+                } else {
+                    PointsStorage::Shared {
+                        base: base.clone(),
+                        changes: RwLock::new(changes.read().unwrap().clone()),
+                        materialized: OnceLock::new(),
+                    }
+                }
+            }
+        })
+    }
+}
 
 // Points are guarded by specific logic and if they are overwritten by something that shouldn't it
 // should not be that tragic.
@@ -408,25 +446,70 @@ unsafe impl Sync for Points {}
 
 impl Points {
     pub fn new(length: usize) -> Self {
-        Self(vec![Default::default(); length])
+        Self(PointsStorage::Dense(vec![Default::default(); length]))
     }
 
-    pub fn from_binding_snapshot(snapshot: &[Point]) -> Self {
-        Self(snapshot.iter().copied().map(Cell::new).collect())
+    pub fn from_binding_snapshot(snapshot: Arc<[Point]>) -> Self {
+        Self(PointsStorage::Shared {
+            base: snapshot,
+            changes: RwLock::new(HashMap::new()),
+            materialized: OnceLock::new(),
+        })
     }
 
     #[inline]
     pub fn get(&self, index: NodeIndex) -> Point {
-        self.0[index as usize].get()
+        match &self.0 {
+            PointsStorage::Empty => panic!("points are empty"),
+            PointsStorage::Dense(points) => points[index as usize].get(),
+            PointsStorage::Shared {
+                base,
+                changes,
+                materialized,
+            } => {
+                if let Some(points) = materialized.get() {
+                    return points[index as usize].get();
+                }
+                let changes = changes.read().unwrap();
+                if let Some(points) = materialized.get() {
+                    points[index as usize].get()
+                } else {
+                    changes.get(&index).copied().unwrap_or(base[index as usize])
+                }
+            }
+        }
     }
 
     #[inline]
     pub fn set(&self, index: NodeIndex, point: Point) {
-        self.0[index as usize].set(point);
+        match &self.0 {
+            PointsStorage::Empty => panic!("points are empty"),
+            PointsStorage::Dense(points) => points[index as usize].set(point),
+            PointsStorage::Shared {
+                changes,
+                materialized,
+                ..
+            } => {
+                if let Some(points) = materialized.get() {
+                    points[index as usize].set(point);
+                    return;
+                }
+                let mut changes = changes.write().unwrap();
+                if let Some(points) = materialized.get() {
+                    points[index as usize].set(point);
+                } else {
+                    changes.insert(index, point);
+                }
+            }
+        }
     }
 
     pub fn invalidate_references_to(&mut self, file_index: Option<FileIndex>) {
-        for cell in &self.0 {
+        self.materialize_dense();
+        let PointsStorage::Dense(points) = &self.0 else {
+            return;
+        };
+        for cell in points {
             let locality = cell.get().locality();
             if locality == Locality::DirectExtern && Some(cell.get().file_index()) == file_index {
                 cell.set(Point::new_uncalculated());
@@ -437,27 +520,100 @@ impl Points {
     }
 
     pub fn invalidate_full_db(&mut self) {
-        for cell in &self.0 {
-            cell.set(Point::new_uncalculated())
+        match &mut self.0 {
+            PointsStorage::Empty => (),
+            PointsStorage::Dense(points) => {
+                for cell in points {
+                    cell.set(Point::new_uncalculated());
+                }
+            }
+            PointsStorage::Shared { base, .. } => *self = Self::new(base.len()),
         }
     }
 
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = Point> + '_ {
-        self.0.iter().map(|p| p.get())
+    pub fn iter(&self) -> PointsIter<'_> {
+        match &self.0 {
+            PointsStorage::Empty => PointsIter::Empty,
+            PointsStorage::Dense(points) => PointsIter::Dense(points.iter()),
+            PointsStorage::Shared { base, .. } => PointsIter::Shared(self, 0..base.len()),
+        }
+    }
+
+    pub fn materialize_for_inference(&self) {
+        if let PointsStorage::Shared {
+            base,
+            changes,
+            materialized,
+        } = &self.0
+            && materialized.get().is_none()
+        {
+            let mut changes = changes.write().unwrap();
+            materialized.get_or_init(|| {
+                let points: Vec<_> = base.iter().copied().map(Cell::new).collect();
+                for (&index, &point) in changes.iter() {
+                    points[index as usize].set(point);
+                }
+                points
+            });
+            changes.clear();
+        }
+    }
+
+    fn materialize_dense(&mut self) {
+        if let PointsStorage::Shared {
+            base,
+            changes,
+            materialized,
+        } = &self.0
+        {
+            let points = if let Some(points) = materialized.get() {
+                points.clone()
+            } else {
+                let points: Vec<_> = base.iter().copied().map(Cell::new).collect();
+                for (&index, &point) in changes.read().unwrap().iter() {
+                    points[index as usize].set(point);
+                }
+                points
+            };
+            self.0 = PointsStorage::Dense(points);
+        }
     }
 
     pub fn backup(&self, range: Range<NodeIndex>) -> PointsBackup {
-        let slice = &self.0[range.start as usize..range.end as usize];
-        PointsBackup {
-            range,
-            points: slice.to_vec(),
-        }
+        let points = match &self.0 {
+            PointsStorage::Dense(dense) => dense[range.start as usize..range.end as usize].to_vec(),
+            _ => range
+                .clone()
+                .map(|index| Cell::new(self.get(index)))
+                .collect(),
+        };
+        PointsBackup { points, range }
     }
 
     pub fn reset_from_backup(&self, backup: &PointsBackup) {
         for (i, points_index) in backup.range.clone().enumerate() {
-            self.0[points_index as usize].set(backup.points[i].get());
+            self.set(points_index, backup.points[i].get());
+        }
+    }
+}
+
+pub(crate) enum PointsIter<'a> {
+    Empty,
+    Dense(std::slice::Iter<'a, Cell<Point>>),
+    Shared(&'a Points, Range<usize>),
+}
+
+impl Iterator for PointsIter<'_> {
+    type Item = Point;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::Dense(iter) => iter.next().map(Cell::get),
+            Self::Shared(points, indexes) => {
+                indexes.next().map(|index| points.get(index as NodeIndex))
+            }
         }
     }
 }
@@ -2184,6 +2340,47 @@ pub struct HeuristicBound {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_points_keep_file_versions_independent_across_materialization() {
+        let original = Point::new_specific(Specific::Analyzed, Locality::NameBinder);
+        let changed = Point::new_specific(Specific::Calculating, Locality::NameBinder);
+        let points = Points::from_binding_snapshot(vec![original; 3].into());
+        points.set(1, changed);
+        let cloned = points.clone();
+
+        points.materialize_for_inference();
+        assert_eq!(points.get(1), changed);
+        points.set(2, changed);
+        assert_eq!(cloned.get(1), changed);
+        assert_eq!(cloned.get(2), original);
+
+        cloned.set(0, changed);
+        cloned.materialize_for_inference();
+        assert_eq!(cloned.get(0), changed);
+        assert_eq!(points.get(0), original);
+        let backup = points.backup(0..3);
+        points.set(1, original);
+        points.reset_from_backup(&backup);
+        assert_eq!(points.get(1), changed);
+    }
+
+    #[test]
+    fn shared_points_invalidation_preserves_binding_points() {
+        let binding = Point::new_specific(Specific::Analyzed, Locality::NameBinder);
+        let inferred = Point::new_specific(Specific::Calculating, Locality::Complex);
+        for materialize_first in [false, true] {
+            let mut points = Points::from_binding_snapshot(vec![binding, binding].into());
+            points.set(1, inferred);
+            if materialize_first {
+                points.materialize_for_inference();
+            }
+            points.invalidate_references_to(None);
+            assert_eq!(points.get(0), binding);
+            assert_eq!(points.get(1), Point::new_uncalculated());
+        }
+    }
+
     #[test]
     fn test_sizes() {
         use std::mem::size_of;

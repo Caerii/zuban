@@ -259,7 +259,7 @@ fn bench_same_length_lsp_edit(c: &mut Criterion, name: &str, code: String) {
     });
 }
 
-fn bench_large_reference_lsp_edit(c: &mut Criterion, standalone: bool) {
+fn bench_large_reference_lsp_edit(c: &mut Criterion, standalone: bool, diagnostics: bool) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
     let mut code = String::from("alpha = 1\ndelta = 2\n");
@@ -268,10 +268,10 @@ fn bench_large_reference_lsp_edit(c: &mut Criterion, standalone: bool) {
     }
     code.push_str(if standalone { "alpha\n" } else { "alpha + 0\n" });
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
-    let name = if standalone {
-        "standalone reference edit in 16k-unique-name file"
-    } else {
-        "compound reference edit in 16k-unique-name file"
+    let name = match (standalone, diagnostics) {
+        (true, true) => "standalone reference edit and diagnostics in 16k-unique-name file",
+        (true, false) => "standalone reference edit in 16k-unique-name file",
+        (false, _) => "compound reference edit in 16k-unique-name file",
     };
     let mut use_delta = false;
     c.bench_function(name, |b| {
@@ -295,6 +295,9 @@ fn bench_large_reference_lsp_edit(c: &mut Criterion, standalone: bool) {
                 )
                 .unwrap();
             use_delta = !use_delta;
+            if diagnostics {
+                std::hint::black_box(project.document(&path).unwrap().diagnostics());
+            }
             std::hint::black_box(project.code_of_in_memory_file(&path));
         })
     });
@@ -674,8 +677,9 @@ fn bench_type_checking(c: &mut Criterion) {
             .map(|index| format!("name_{index} = 1\n"))
             .collect(),
     );
-    bench_large_reference_lsp_edit(c, true);
-    bench_large_reference_lsp_edit(c, false);
+    bench_large_reference_lsp_edit(c, true, false);
+    bench_large_reference_lsp_edit(c, true, true);
+    bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,
         "length-changing LSP edit in 100 KiB file",
