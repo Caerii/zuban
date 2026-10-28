@@ -150,13 +150,13 @@ mod flow_context_tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn test_flow_key(file: u8, root: u32, index: u8, shape: u8) -> FlowKey {
+    fn test_flow_key(file: u8, root: u32, index: u8, shape: u8, node_index: u8) -> FlowKey {
         let name = FlowKey::Name(PointLink::new(vfs::FileIndex(file as u32), root));
         let attr = ["a", "b", "c", "d"][index as usize];
         let member = || FlowKey::Member(Arc::new(name.clone()), DbString::Static(attr));
         let indexed = || FlowKey::Index {
             base_key: Arc::new(name.clone()),
-            node_index: index as u32,
+            node_index: node_index as u32,
             match_index: FlowKeyIndex::Int(index as isize),
         };
         match shape {
@@ -165,9 +165,36 @@ mod flow_context_tests {
             2 => FlowKey::Member(Arc::new(indexed()), DbString::Static(attr)),
             _ => FlowKey::Index {
                 base_key: Arc::new(member()),
-                node_index: index as u32,
+                node_index: node_index as u32,
                 match_index: FlowKeyIndex::Int(index as isize),
             },
+        }
+    }
+
+    fn same_flow_key_storage(db: &Database, left: &FlowKey, right: &FlowKey) -> bool {
+        match (left, right) {
+            (FlowKey::Name(left), FlowKey::Name(right)) => left == right,
+            (FlowKey::Member(left_base, left_attr), FlowKey::Member(right_base, right_attr)) => {
+                left_attr.as_str(db) == right_attr.as_str(db)
+                    && same_flow_key_storage(db, left_base, right_base)
+            }
+            (
+                FlowKey::Index {
+                    base_key: left_base,
+                    node_index: left_node,
+                    match_index: left_match,
+                },
+                FlowKey::Index {
+                    base_key: right_base,
+                    node_index: right_node,
+                    match_index: right_match,
+                },
+            ) => {
+                left_node == right_node
+                    && left_match == right_match
+                    && same_flow_key_storage(db, left_base, right_base)
+            }
+            _ => false,
         }
     }
 
@@ -194,7 +221,7 @@ mod flow_context_tests {
         runner
             .run(&cases, |(entries, queries)| {
                 let mut frame = Frame::new_base_scope();
-                let make_key = |root, index, shape| test_flow_key(1, root, index, shape);
+                let make_key = |root, index, shape| test_flow_key(1, root, index, shape, index);
                 for (root, index, shape) in entries {
                     frame.entries.push(Entry {
                         key: make_key(root, index, shape),
@@ -246,33 +273,74 @@ mod flow_context_tests {
         options.settings.typeshed_path = Some(test_utils::typeshed_path());
         let project = crate::Project::without_watcher(options, crate::RunCause::TypeChecking);
         let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(64));
-        let actions = prop::collection::vec((0u8..4, 1u8..4, 0u32..32, 0u8..4, 0u8..4), 1..100);
+        let actions = prop::collection::vec(
+            (
+                0u8..4,
+                1u8..4,
+                0u32..32,
+                0u8..4,
+                0u8..4,
+                0u8..8,
+                any::<bool>(),
+                any::<bool>(),
+            ),
+            1..100,
+        );
         runner
             .run(&actions, |actions| {
                 let mut frame = Frame::new_base_scope();
                 for i in 0..70u32 {
                     frame.entries.push(Entry {
-                        key: test_flow_key((i % 3 + 1) as u8, i % 8, (i % 4) as u8, (i % 4) as u8),
+                        key: test_flow_key(
+                            (i % 3 + 1) as u8,
+                            i % 8,
+                            (i % 4) as u8,
+                            (i % 4) as u8,
+                            (i % 4) as u8,
+                        ),
                         type_: EntryKind::OriginalDeclaration,
                         modifies_ancestors: true,
                         deleted: false,
                         widens: false,
                     });
                 }
+                let mut model = frame.entries.clone();
+                let renamed_index_entry = Entry {
+                    key: test_flow_key(1, 0, 0, 0, 7),
+                    type_: EntryKind::OriginalDeclaration,
+                    modifies_ancestors: true,
+                    deleted: true,
+                    widens: true,
+                };
+                frame.overwrite_entry(&project.db, renamed_index_entry.clone());
+                model[0] = renamed_index_entry;
                 let first_key = frame.entries[0].key.clone();
-                let absent_key = test_flow_key(4, 30, 3, 2);
-                for (action, file, root, index, shape) in actions {
-                    let key = test_flow_key(file, root, index, shape);
+                let absent_key = test_flow_key(4, 30, 3, 2, 7);
+                for (action, file, root, index, shape, node_index, deleted, widens) in actions {
+                    let key = test_flow_key(file, root, index, shape, node_index);
                     let entry = Entry {
                         key: key.clone(),
                         type_: EntryKind::OriginalDeclaration,
                         modifies_ancestors: true,
-                        deleted: false,
-                        widens: false,
+                        deleted,
+                        widens,
                     };
                     match action {
-                        0 => frame.overwrite_entry(&project.db, entry),
-                        1 => frame.entries.push(entry),
+                        0 => {
+                            frame.overwrite_entry(&project.db, entry.clone());
+                            if let Some(position) = model
+                                .iter()
+                                .position(|old| old.key.equals(&project.db, &key))
+                            {
+                                model[position] = entry;
+                            } else {
+                                model.push(entry);
+                            }
+                        }
+                        1 => {
+                            frame.entries.push(entry.clone());
+                            model.push(entry);
+                        }
                         2 => {
                             let taken = frame.take();
                             prop_assert!(frame.entries.is_empty());
@@ -280,9 +348,18 @@ mod flow_context_tests {
                         }
                         _ => frame = frame.clone(),
                     }
+                    prop_assert_eq!(frame.entries.len(), model.len());
+                    for (actual, expected) in frame.entries.iter().zip(&model) {
+                        prop_assert!(same_flow_key_storage(
+                            &project.db,
+                            &actual.key,
+                            &expected.key
+                        ));
+                        prop_assert_eq!(actual.deleted, expected.deleted);
+                        prop_assert_eq!(actual.widens, expected.widens);
+                    }
                     for query in [&key, &first_key, &absent_key] {
-                        let expected = frame
-                            .entries
+                        let expected = model
                             .iter()
                             .position(|entry| entry.key.equals(&project.db, query));
                         prop_assert_eq!(
