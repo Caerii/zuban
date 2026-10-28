@@ -824,27 +824,30 @@ macro_rules! create_grammar {
                 else {
                     return Err(code);
                 };
-                let mut nodes = Vec::with_capacity(self.internal_tree.nodes.len());
-                for node in self.internal_tree.nodes.iter() {
-                    let mut updated = *node;
+                // InternalNode is Copy, so cloning the contiguous array uses a
+                // bulk copy. Only the nodes spanning the name and those after
+                // it need adjustment.
+                let mut nodes = self.internal_tree.nodes.as_ref().clone();
+                let first_after = nodes.partition_point(|node| node.start_index < token_end);
+                for node in &mut nodes[..first_after] {
                     let Some(end) = node.start_index.checked_add(node.length) else {
                         return Err(code);
                     };
-                    if node.start_index >= token_end {
-                        let Some(start) = node.start_index.checked_add_signed(shift) else {
-                            return Err(code);
-                        };
-                        updated.start_index = start;
-                    } else if node.start_index <= token_start && end >= token_end {
+                    if node.start_index <= token_start && end >= token_end {
                         let Some(length) = node.length.checked_add_signed(shift) else {
                             return Err(code);
                         };
-                        updated.length = length;
+                        node.length = length;
                     } else if end > token_start {
                         // A node overlaps only part of the edited token.
                         return Err(code);
                     }
-                    nodes.push(updated);
+                }
+                for node in &mut nodes[first_after..] {
+                    let Some(start) = node.start_index.checked_add_signed(shift) else {
+                        return Err(code);
+                    };
+                    node.start_index = start;
                 }
                 Ok(Self {
                     internal_tree: $crate::InternalTree {
