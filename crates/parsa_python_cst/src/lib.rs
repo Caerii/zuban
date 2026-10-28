@@ -114,8 +114,34 @@ impl Tree {
         {
             return Err(code);
         }
-        // SAFETY: only the contents of one complete Name token change; its
-        // width, neighboring text, keyword status, and syntax nodes agree.
+        // SAFETY: the checks above prove the new source differs only in this
+        // complete, same-width name token.
+        unsafe { self.with_verified_same_length_name_edit(start, end, code) }
+    }
+
+    /// Rebind a source buffer already constructed from this tree by replacing
+    /// exactly one complete, same-width name token.
+    ///
+    /// # Safety
+    /// `code` must differ from `self.code()` only at `start..end`.
+    pub unsafe fn with_verified_same_length_name_edit(
+        &self,
+        start: usize,
+        end: usize,
+        code: Box<str>,
+    ) -> Result<Self, Box<str>> {
+        let Some(replacement) = code.get(start..end) else {
+            return Err(code);
+        };
+        if self.code().len() != code.len()
+            || !self.can_reuse_syntax_for_name_edit(start, end, replacement)
+        {
+            return Err(code);
+        }
+        debug_assert_eq!(self.code().get(..start), code.get(..start));
+        debug_assert_eq!(self.code().get(end..), code.get(end..));
+        // SAFETY: the caller guarantees unchanged surrounding source; the
+        // checks above preserve the token width and grammar category.
         Ok(Self(Arc::new(unsafe {
             self.0.rebind_code_unchecked(code)
         })))

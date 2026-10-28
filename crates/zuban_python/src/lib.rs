@@ -167,7 +167,12 @@ impl Project {
                             file.tree
                                 .can_reuse_syntax_for_name_edit(start, end, replacement)
                         })
-                        .map(|_| (file.tree.clone(), start, end))
+                        .map(|_| database::SyntaxReuseCandidate {
+                            tree: file.tree.clone(),
+                            start,
+                            end,
+                            source_address: code.as_ptr() as usize,
+                        })
                 });
                 let updated_line_indices = match applied.line_index_update {
                     lsp_utils::LineIndexUpdate::Reuse => Some(file.newline_indices.clone()),

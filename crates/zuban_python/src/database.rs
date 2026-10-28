@@ -1065,6 +1065,13 @@ pub enum RunCause {
     LanguageServer,
 }
 
+pub(crate) struct SyntaxReuseCandidate {
+    pub tree: Tree,
+    pub start: usize,
+    pub end: usize,
+    pub source_address: usize,
+}
+
 pub(crate) struct Database {
     pub vfs: Vfs<PythonFile>,
     pub python_state: PythonState,
@@ -1444,7 +1451,7 @@ impl Database {
         path: PathWithScheme,
         code: Box<str>,
         parent: Option<FileIndex>,
-        syntax_candidate: Option<(Tree, usize, usize)>,
+        syntax_candidate: Option<SyntaxReuseCandidate>,
     ) {
         let invalidation =
             self.store_in_memory_file_without_db_invalidation(path, code, parent, syntax_candidate);
@@ -1465,7 +1472,7 @@ impl Database {
         path: PathWithScheme,
         code: Box<str>,
         parent: Option<FileIndex>,
-        syntax_candidate: Option<(Tree, usize, usize)>,
+        syntax_candidate: Option<SyntaxReuseCandidate>,
     ) -> InvalidationResult {
         if parent.is_none()
             && let Some(index) = self.vfs.unchanged_in_memory_file(&path, &code)
@@ -1505,8 +1512,30 @@ impl Database {
             path,
             code,
             |file_index, file_entry, new_code| {
-                let mut file = if let Some((old_tree, start, end)) = syntax_candidate {
-                    match old_tree.with_same_length_name_edit(start, end, new_code) {
+                let mut file = if let Some(candidate) = syntax_candidate {
+                    // The LSP single-edit path constructs this exact allocation
+                    // from the old code and moves it through the VFS unchanged.
+                    // A different allocation takes the fully validated path.
+                    let rebound = if new_code.as_ptr() as usize == candidate.source_address {
+                        // SAFETY: apply_document_changes_with_metadata builds
+                        // old[..start] + replacement + old[end..] in one pass.
+                        // The address check confirms the VFS passed that owned
+                        // buffer to this callback without replacing it.
+                        unsafe {
+                            candidate.tree.with_verified_same_length_name_edit(
+                                candidate.start,
+                                candidate.end,
+                                new_code,
+                            )
+                        }
+                    } else {
+                        candidate.tree.with_same_length_name_edit(
+                            candidate.start,
+                            candidate.end,
+                            new_code,
+                        )
+                    };
+                    match rebound {
                         Ok(tree) => PythonFile::new(&self.project, file_index, file_entry, tree),
                         Err(code) => PythonFile::from_file_entry_and_code(
                             &self.project,
