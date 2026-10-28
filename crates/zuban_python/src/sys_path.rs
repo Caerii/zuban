@@ -189,7 +189,7 @@ fn lib_path(
 ) -> Option<String> {
     let check = |path: String| {
         let os_path = Path::new(&path).join("os.py");
-        match file_access.exists(&path) {
+        match file_access.exists(&os_path) {
             Ok(true) => {
                 tracing::debug!("Found {os_path:?} -> choosing {path} as the library path");
                 Some(path)
@@ -605,7 +605,9 @@ mod tests {
         fn which(&self, executable_name: &str) -> Result<PathBuf, which::Error> {
             Ok(match executable_name {
                 "python3.exe" => r"C:\Program Files\Python312\python.exe",
+                "python.exe" => r"C:\Program Files\Python312\python.exe",
                 "python3" => "/usr/bin/python3",
+                "python" => "/usr/bin/python3",
                 _ => unimplemented!("{executable_name}"),
             }
             .into())
@@ -680,12 +682,36 @@ mod tests {
         files: &[(&str, &str)],
         home_dir: bool,
     ) -> Vec<String> {
+        // Directory fixtures that represent a Python library include its os.py.
+        // Discovery must not accept a bare library directory as proof of stdlib.
+        let stdlib_files: Vec<_> = dirs
+            .iter()
+            .filter_map(|dir| {
+                Path::new(dir)
+                    .ancestors()
+                    .find(|ancestor| {
+                        ancestor.file_name().is_some_and(|name| {
+                            let name = name.to_string_lossy();
+                            if cfg!(windows) {
+                                name.eq_ignore_ascii_case("Lib")
+                            } else {
+                                name.starts_with("python3.")
+                            }
+                        })
+                    })
+                    .map(|stdlib| stdlib.join("os.py").to_string_lossy().into_owned())
+            })
+            .collect();
         let files_or_dirs: Vec<_> = dirs
             .iter()
             .map(|path| DirOrFile {
                 path,
                 kind: DirOrFileKind::Dir,
             })
+            .chain(stdlib_files.iter().map(|path| DirOrFile {
+                path,
+                kind: DirOrFileKind::File(""),
+            }))
             .chain(files.iter().map(|(path, content)| DirOrFile {
                 path,
                 kind: DirOrFileKind::File(content),
@@ -946,6 +972,29 @@ mod tests {
                 r"C:\Users\myuser\proj\venv\Lib\site-packages",
                 r"C:\Program Files\Python312\Lib\site-packages",
             ]
+        );
+    }
+
+    #[test]
+    fn test_library_directory_without_os_py_is_not_a_standard_library() {
+        let lib = if cfg!(windows) {
+            r"C:\Program Files\Python312\Lib"
+        } else {
+            "/usr/lib/python3.14"
+        };
+        let files_or_dirs = [DirOrFile {
+            path: lib,
+            kind: DirOrFileKind::Dir,
+        }];
+        assert_eq!(
+            lib_path(
+                KnownFiles {
+                    files_or_dirs: &files_or_dirs,
+                    home_dir: false,
+                },
+                None,
+            ),
+            None,
         );
     }
 
