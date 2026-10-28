@@ -429,6 +429,28 @@ fn bench_type_checking(c: &mut Criterion) {
             unchanged_project.store_in_memory_file(unchanged_path.clone(), unchanged_code.clone())
         })
     });
+    let (mut batch_project, batch_paths) = prepare_independent_files(1000);
+    let batch_updated = unchanged_code
+        .replace("return x", "return 1")
+        .into_boxed_str();
+    let mut batch_is_updated = false;
+    c.bench_function("store changed file and 999 unchanged files", |b| {
+        b.iter(|| {
+            batch_is_updated = !batch_is_updated;
+            batch_project.store_in_memory_file(
+                batch_paths[0].clone(),
+                if batch_is_updated {
+                    &batch_updated
+                } else {
+                    &unchanged_code
+                }
+                .clone(),
+            );
+            for path in &batch_paths[1..] {
+                batch_project.store_in_memory_file(path.clone(), unchanged_code.clone());
+            }
+        })
+    });
     c.bench_function("project setup", |b| {
         b.iter(|| {
             let mut options = ProjectOptions::default();

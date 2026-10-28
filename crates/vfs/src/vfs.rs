@@ -480,7 +480,6 @@ impl<F: VfsFile> Vfs<F> {
         code: Box<str>,
         new_file: impl FnOnce(FileIndex, &FileEntry, Box<str>) -> F,
     ) -> (Option<FileIndex>, InvalidationResult) {
-        let epoch = self.advance_structure_epoch();
         tracing::info!("Loading in memory file: {}", &path.path);
         let ensured = self
             .workspaces
@@ -489,6 +488,7 @@ impl<F: VfsFile> Vfs<F> {
         let file_entry = match ensured.kind {
             AddedKind::FileEntry(file_entry) => file_entry,
             AddedKind::Gitignore(g) => {
+                self.advance_structure_epoch();
                 self.in_memory_files
                     .insert(path.clone(), InMemoryKind::Gitignore(g));
                 return (None, InvalidationResult::InvalidatedFiles);
@@ -496,6 +496,16 @@ impl<F: VfsFile> Vfs<F> {
         };
 
         let in_mem_file = self.in_memory_file(&path);
+        // Replacing the contents of an existing overlay leaves the workspace
+        // structure intact. Dependents are invalidated below; unrelated open
+        // buffers can retain their validated no-op shortcut.
+        let epoch = if in_mem_file
+            .is_some_and(|file_index| file_entry.get_file_index() == Some(file_index))
+        {
+            self.structure_epoch.load(Ordering::Relaxed)
+        } else {
+            self.advance_structure_epoch()
+        };
         debug_assert!(
             in_mem_file.is_none() || in_mem_file.is_some() && file_entry.get_file_index().is_some(),
             "{path:?}; in_mem_file: {in_mem_file:?}; ensured file_index: {:?}",

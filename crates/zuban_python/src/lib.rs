@@ -762,6 +762,83 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn content_edit_preserves_other_validated_buffers_but_new_file_expires_them() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let path = |project: &Project, name: &str| {
+            let vfs = project.vfs_handler();
+            PathWithScheme::with_file_scheme(vfs.normalize_rc_path(vfs.unchecked_abs_path(name)))
+        };
+        let a = path(&project, "/epoch-a.py");
+        let b = path(&project, "/epoch-b.py");
+        let c = path(&project, "/epoch-c.py");
+        project.store_in_memory_file(a.clone(), "a = 1".into());
+        project.store_in_memory_file(b.clone(), "b = 1".into());
+        project.store_in_memory_file(a.clone(), "a = 1".into());
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&a, "a = 1")
+                .is_some()
+        );
+
+        project.store_in_memory_file(b, "b = 2".into());
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&a, "a = 1")
+                .is_some()
+        );
+
+        project.store_in_memory_file(c, "c = 1".into());
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&a, "a = 1")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unchanged_dependent_buffer_uses_updated_import_after_content_edit() {
+        let fs = LocalFS::without_watcher();
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        options
+            .settings
+            .mypy_path
+            .push(fs.normalize_rc_path(fs.unchecked_abs_path("/epoch-deps")));
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let path = |project: &Project, name: &str| {
+            let vfs = project.vfs_handler();
+            PathWithScheme::with_file_scheme(vfs.normalize_rc_path(vfs.unchecked_abs_path(name)))
+        };
+        let a = path(&project, "/epoch-deps/a.py");
+        let b = path(&project, "/epoch-deps/b.py");
+        let a_code = "from b import foo\nx: int = foo()\n";
+        project.store_in_memory_file(b.clone(), "def foo() -> int: return 1\n".into());
+        project.store_in_memory_file(a.clone(), a_code.into());
+        assert!(project.document(&a).unwrap().diagnostics().is_empty());
+
+        project.store_in_memory_file(b, "def foo() -> str: return 'wrong'\n".into());
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&a, a_code)
+                .is_some()
+        );
+        project.store_in_memory_file(a.clone(), a_code.into());
+        assert_eq!(project.document(&a).unwrap().diagnostics().len(), 1);
+    }
+
+    #[test]
     fn unchanged_buffer_shortcut_survives_many_prepared_files() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());
