@@ -42,6 +42,85 @@ impl Tree {
         Self(Arc::new(parse(code)))
     }
 
+    pub fn can_reuse_syntax_for_name_edit(
+        &self,
+        start: usize,
+        end: usize,
+        replacement: &str,
+    ) -> bool {
+        let old = self.code();
+        if start >= end
+            || end > old.len()
+            || replacement.len() != end - start
+            || old
+                .as_bytes()
+                .get(start.wrapping_sub(1))
+                .is_some_and(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'\'' | b'"' | b'\\')
+                })
+            || (old.as_bytes().get(start.wrapping_sub(1)) == Some(&b'.')
+                && old
+                    .as_bytes()
+                    .get(start.wrapping_sub(2))
+                    .is_some_and(u8::is_ascii_digit))
+            || matches!(old.as_bytes().get(end), Some(b'\'' | b'"'))
+        {
+            return false;
+        }
+        let Some(old_name) = old.get(start..end) else {
+            return false;
+        };
+        let reusable_name = |name: &str| {
+            let name_bytes = name.as_bytes();
+            name_bytes
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+                && name_bytes
+                    .iter()
+                    .skip(1)
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                && !keywords_contain(name)
+                && !matches!(name, "match" | "case" | "type" | "_" | "async" | "await")
+        };
+        if !reusable_name(old_name) || !reusable_name(replacement) {
+            return false;
+        }
+        let Ok(start_index) = start.try_into() else {
+            return false;
+        };
+        let leaf = self.0.leaf_by_position(start_index);
+        leaf.start() as usize == start
+            && leaf.end() as usize == end
+            && leaf.is_type(Terminal(TerminalType::Name))
+    }
+
+    /// Reuse syntax nodes when one complete ASCII name token changes without
+    /// changing its byte width or any surrounding source text.
+    pub fn with_same_length_name_edit(
+        &self,
+        start: usize,
+        end: usize,
+        code: Box<str>,
+    ) -> Result<Self, Box<str>> {
+        let old = self.code();
+        let Some(replacement) = code.get(start..end) else {
+            return Err(code);
+        };
+        if !self.can_reuse_syntax_for_name_edit(start, end, replacement)
+            || old.len() != code.len()
+            || old.get(..start) != code.get(..start)
+            || code.get(start..end) != Some(replacement)
+            || old.get(end..) != code.get(end..)
+        {
+            return Err(code);
+        }
+        // SAFETY: only the contents of one complete Name token change; its
+        // width, neighboring text, keyword status, and syntax nodes agree.
+        Ok(Self(Arc::new(unsafe {
+            self.0.rebind_code_unchecked(code)
+        })))
+    }
+
     pub fn invalid_empty() -> Self {
         Self(Arc::new(PyTree::empty()))
     }
@@ -5403,6 +5482,63 @@ pub enum UnpackedError<'db> {
     CaseBlock(CaseBlock<'db>),
     SimpleStmt(SimpleStmt<'db>),
     NonBlockErrorPart(NonBlockErrorPart<'db>),
+}
+
+#[cfg(test)]
+mod incremental_name_tests {
+    use super::*;
+
+    #[test]
+    fn reused_name_nodes_match_fresh_parse() {
+        for (old, start, end, replacement) in [
+            ("x = 1\n", 0, 1, "y"),
+            ("foo = 1\n", 0, 3, "bar"),
+            ("def foo():\n    pass\n", 4, 7, "bar"),
+            ("class Foo:\n    pass\n", 6, 9, "Bar"),
+            ("obj.foo = 1\n", 4, 7, "bar"),
+            ("from pkg import foo\n", 16, 19, "bar"),
+        ] {
+            let tree = Tree::parse(old.into());
+            let new = format!("{}{}{}", &old[..start], replacement, &old[end..]);
+            let reused = tree
+                .with_same_length_name_edit(start, end, new.clone().into())
+                .unwrap();
+            let fresh = Tree::parse(new.into());
+            assert_eq!(reused.code(), fresh.code());
+            assert_eq!(reused.length(), fresh.length());
+            for index in 0..reused.length() as NodeIndex {
+                let a = reused.0.node_by_index(index);
+                let b = fresh.0.node_by_index(index);
+                assert_eq!(
+                    (a.type_(), a.start(), a.end()),
+                    (b.type_(), b.start(), b.end())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_changing_names_fall_back_to_parsing() {
+        for (old, start, end, new) in [
+            ("foo = 1\n", 0, 3, "for = 1\n"),
+            ("foo = 1\n", 0, 3, "case = 1\n"),
+            ("x = 1\n", 0, 1, "_ = 1\n"),
+            ("x\"hi\"\n", 0, 1, "f\"hi\"\n"),
+            ("1x3\n", 1, 3, "1e3\n"),
+            ("1.x3\n", 2, 4, "1.e3\n"),
+            ("foo = 1\n", 0, 3, "bars = 1\n"),
+            ("x = 'foo'\n", 5, 8, "x = 'bar'\n"),
+            ("é = 1\n", 0, 2, "xy = 1\n"),
+            ("x = 1", 0, 1, "y = 1"),
+        ] {
+            let tree = Tree::parse(old.into());
+            assert!(
+                tree.with_same_length_name_edit(start, end, new.into())
+                    .is_err(),
+                "{old:?} -> {new:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::{fmt, marker::PhantomData};
+use std::{fmt, marker::PhantomData, sync::Arc};
 
 use utils::FastHashMap;
 
@@ -30,7 +30,7 @@ pub trait Tokenizer<'a, T: Token>: Iterator {
 #[derive(Debug, Clone)]
 pub struct InternalTree {
     pub code: Box<str>,
-    pub nodes: Vec<InternalNode>,
+    pub nodes: Arc<Vec<InternalNode>>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -75,7 +75,10 @@ mod tests {
 
 impl InternalTree {
     pub fn new(code: Box<str>, nodes: Vec<InternalNode>) -> Self {
-        Self { code, nodes }
+        Self {
+            code,
+            nodes: Arc::new(nodes),
+        }
     }
 }
 

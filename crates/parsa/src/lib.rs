@@ -778,7 +778,22 @@ macro_rules! create_grammar {
                 Self {
                     internal_tree: $crate::InternalTree {
                         code: Box::from(""),
-                        nodes: vec![],
+                        nodes: std::sync::Arc::new(vec![]),
+                    }
+                }
+            }
+
+            /// Rebind source text when the caller has proved that token types,
+            /// syntax nodes, and all byte offsets remain unchanged.
+            ///
+            /// # Safety
+            /// The caller must preserve the complete syntax tree structure.
+            pub unsafe fn rebind_code_unchecked(&self, code: Box<str>) -> Self {
+                debug_assert_eq!(code.len(), self.internal_tree.code.len());
+                Self {
+                    internal_tree: $crate::InternalTree {
+                        code,
+                        nodes: self.internal_tree.nodes.clone(),
                     }
                 }
             }

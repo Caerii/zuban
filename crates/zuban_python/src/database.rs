@@ -1436,14 +1436,26 @@ impl Database {
         code: Box<str>,
         parent: Option<FileIndex>,
     ) {
-        let invalidation = self.store_in_memory_file_without_db_invalidation(path, code, parent);
+        self.store_in_memory_file_with_syntax_candidate(path, code, parent, None);
+    }
+
+    pub(crate) fn store_in_memory_file_with_syntax_candidate(
+        &mut self,
+        path: PathWithScheme,
+        code: Box<str>,
+        parent: Option<FileIndex>,
+        syntax_candidate: Option<(Tree, usize, usize)>,
+    ) {
+        let invalidation =
+            self.store_in_memory_file_without_db_invalidation(path, code, parent, syntax_candidate);
         self.handle_invalidation(invalidation);
     }
 
     pub fn store_in_memory_files(&mut self, files: Vec<(PathWithScheme, Box<str>)>) {
         let mut invalidation = InvalidationResult::InvalidatedFiles;
         for (path, code) in files {
-            invalidation |= self.store_in_memory_file_without_db_invalidation(path, code, None);
+            invalidation |=
+                self.store_in_memory_file_without_db_invalidation(path, code, None, None);
         }
         self.handle_invalidation(invalidation);
     }
@@ -1453,6 +1465,7 @@ impl Database {
         path: PathWithScheme,
         code: Box<str>,
         parent: Option<FileIndex>,
+        syntax_candidate: Option<(Tree, usize, usize)>,
     ) -> InvalidationResult {
         if parent.is_none()
             && let Some(index) = self.vfs.unchanged_in_memory_file(&path, &code)
@@ -1492,12 +1505,24 @@ impl Database {
             path,
             code,
             |file_index, file_entry, new_code| {
-                let mut file = PythonFile::from_file_entry_and_code(
-                    &self.project,
-                    file_index,
-                    file_entry,
-                    new_code,
-                );
+                let mut file = if let Some((old_tree, start, end)) = syntax_candidate {
+                    match old_tree.with_same_length_name_edit(start, end, new_code) {
+                        Ok(tree) => PythonFile::new(&self.project, file_index, file_entry, tree),
+                        Err(code) => PythonFile::from_file_entry_and_code(
+                            &self.project,
+                            file_index,
+                            file_entry,
+                            code,
+                        ),
+                    }
+                } else {
+                    PythonFile::from_file_entry_and_code(
+                        &self.project,
+                        file_index,
+                        file_entry,
+                        new_code,
+                    )
+                };
                 file.super_file = parent.map(|file| SuperFile {
                     file,
                     offset: None,

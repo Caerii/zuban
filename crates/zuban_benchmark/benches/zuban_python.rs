@@ -231,13 +231,12 @@ fn bench_unchanged_lsp_edit(c: &mut Criterion) {
     });
 }
 
-fn bench_same_length_large_lsp_edit(c: &mut Criterion) {
+fn bench_same_length_lsp_edit(c: &mut Criterion, name: &str, code: String) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
-    let code = format!("x = 1\n#{}\n", "a".repeat(100_000));
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
     let mut use_y = false;
-    c.bench_function("same-length LSP edit in 100 KiB file", |b| {
+    c.bench_function(name, |b| {
         b.iter(|| {
             let replacement = if use_y { "x" } else { "y" };
             project
@@ -303,6 +302,15 @@ fn bench_large_lsp_edit_components(c: &mut Criterion) {
         b.iter_batched(
             || format!("yy{}", &code[1..]).into_boxed_str(),
             |updated| std::hint::black_box(Tree::parse(updated)),
+            BatchSize::SmallInput,
+        )
+    });
+    let tree = Tree::parse(code.clone().into_boxed_str());
+    let updated = format!("y{}", &code[1..]).into_boxed_str();
+    c.bench_function("validate and rebind 100 KiB name edit", |b| {
+        b.iter_batched(
+            || updated.clone(),
+            |code| std::hint::black_box(tree.with_same_length_name_edit(0, 1, code).unwrap()),
             BatchSize::SmallInput,
         )
     });
@@ -602,7 +610,16 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_warm_edit_stage(c, "check stage of deep prepared file", false, true);
     bench_warm_lsp_edit(c);
     bench_unchanged_lsp_edit(c);
-    bench_same_length_large_lsp_edit(c);
+    bench_same_length_lsp_edit(
+        c,
+        "same-length LSP edit in 100 KiB file",
+        format!("x = 1\n#{}\n", "a".repeat(100_000)),
+    );
+    bench_same_length_lsp_edit(
+        c,
+        "same-length LSP edit in 16k-line file",
+        "x = 1\n".repeat(16_000),
+    );
     bench_length_changing_lsp_edit(
         c,
         "length-changing LSP edit in 100 KiB file",

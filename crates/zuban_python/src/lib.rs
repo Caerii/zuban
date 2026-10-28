@@ -160,6 +160,15 @@ impl Project {
         match applied.code {
             std::borrow::Cow::Owned(code) => {
                 let parent = file.super_file.map(|s| s.file);
+                let code = code.into_boxed_str();
+                let syntax_candidate = applied.same_length_edit.and_then(|(start, end)| {
+                    code.get(start..end)
+                        .filter(|replacement| {
+                            file.tree
+                                .can_reuse_syntax_for_name_edit(start, end, replacement)
+                        })
+                        .map(|_| (file.tree.clone(), start, end))
+                });
                 let updated_line_indices = match applied.line_index_update {
                     lsp_utils::LineIndexUpdate::Reuse => Some(file.newline_indices.clone()),
                     lsp_utils::LineIndexUpdate::Shift {
@@ -185,7 +194,12 @@ impl Project {
                     }
                     lsp_utils::LineIndexUpdate::Rebuild => None,
                 };
-                self.db.store_in_memory_file(path, code.into(), parent);
+                self.db.store_in_memory_file_with_syntax_candidate(
+                    path,
+                    code,
+                    parent,
+                    syntax_candidate,
+                );
                 if let Some(line_indices) = updated_line_indices {
                     self.db
                         .vfs
@@ -688,6 +702,45 @@ mod lsp_edit_tests {
     use lsp_types::{Range, TextDocumentContentChangeEvent};
 
     use super::*;
+
+    #[test]
+    fn same_length_name_edit_rebinds_symbols_and_diagnostics() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/name-edit.py")),
+        );
+        project.store_in_memory_file(path.clone(), "foo = 1\nfoo\n".into());
+
+        let edit = |text: &str| TextDocumentContentChangeEvent {
+            range: Some(Range::new(Position::new(0, 0), Position::new(0, 3))),
+            range_length: None,
+            text: text.into(),
+        };
+        let position = |pos: Position| InputPosition::Utf16CodeUnits {
+            line: pos.line as usize,
+            column: pos.character as usize,
+        };
+        project
+            .store_file_with_lsp_changes(path.clone(), vec![edit("bar")], position)
+            .unwrap();
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let file = project.db.loaded_python_file(index);
+        assert!(file.lookup_symbol("bar").is_some());
+        assert!(file.lookup_symbol("foo").is_none());
+        assert_eq!(project.document(&path).unwrap().diagnostics().len(), 1);
+
+        project
+            .store_file_with_lsp_changes(path.clone(), vec![edit("foo")], position)
+            .unwrap();
+        let file = project.db.loaded_python_file(index);
+        assert!(file.lookup_symbol("foo").is_some());
+        assert!(file.lookup_symbol("bar").is_none());
+        assert!(project.document(&path).unwrap().diagnostics().is_empty());
+    }
 
     #[test]
     fn repeated_definitions_form_a_complete_cycle() {
