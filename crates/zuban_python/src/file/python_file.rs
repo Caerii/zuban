@@ -465,7 +465,7 @@ impl<'db> PythonFile {
             return None;
         }
         Some(FlowReuseCandidate {
-            points: self.points.clone(),
+            points: self.points.clone_for_tail_replay(),
             complex_points: self.complex_points.clone(),
             snapshot,
             tail_stmt_index,

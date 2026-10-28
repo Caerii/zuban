@@ -402,11 +402,19 @@ impl fmt::Debug for Point {
 #[derive(Debug, Default)]
 pub(crate) struct Points(PointsStorage);
 
+const REPLAY_POINT_PAGE_SIZE: usize = 256;
+
 #[derive(Debug, Default)]
 enum PointsStorage {
     #[default]
     Empty,
     Dense(Vec<Cell<Point>>),
+    Paged {
+        base: Arc<[Point]>,
+        // Only pages written by this file version are copied. Untouched pages
+        // remain in the immutable analyzed snapshot.
+        changed_pages: Vec<OnceLock<Box<[Cell<Point>]>>>,
+    },
     Shared {
         base: Arc<[Point]>,
         // Inference may write points after binding. Those writes belong to this
@@ -421,6 +429,22 @@ impl Clone for Points {
         Self(match &self.0 {
             PointsStorage::Empty => PointsStorage::Empty,
             PointsStorage::Dense(points) => PointsStorage::Dense(points.clone()),
+            PointsStorage::Paged {
+                base,
+                changed_pages,
+            } => PointsStorage::Paged {
+                base: base.clone(),
+                changed_pages: changed_pages
+                    .iter()
+                    .map(|page| {
+                        let clone = OnceLock::new();
+                        if let Some(points) = page.get() {
+                            clone.get_or_init(|| points.clone());
+                        }
+                        clone
+                    })
+                    .collect(),
+            },
             PointsStorage::Shared {
                 base,
                 changes,
@@ -457,11 +481,34 @@ impl Points {
         })
     }
 
+    pub fn clone_for_tail_replay(&self) -> Self {
+        if matches!(self.0, PointsStorage::Paged { .. }) {
+            return self.clone();
+        }
+        let base: Arc<[Point]> = self.iter().collect::<Vec<_>>().into();
+        let changed_pages = (0..base.len().div_ceil(REPLAY_POINT_PAGE_SIZE))
+            .map(|_| OnceLock::new())
+            .collect();
+        Self(PointsStorage::Paged {
+            base,
+            changed_pages,
+        })
+    }
+
     #[inline]
     pub fn get(&self, index: NodeIndex) -> Point {
         match &self.0 {
             PointsStorage::Empty => panic!("points are empty"),
             PointsStorage::Dense(points) => points[index as usize].get(),
+            PointsStorage::Paged {
+                base,
+                changed_pages,
+            } => changed_pages[index as usize / REPLAY_POINT_PAGE_SIZE]
+                .get()
+                .map_or_else(
+                    || base[index as usize],
+                    |page| page[index as usize % REPLAY_POINT_PAGE_SIZE].get(),
+                ),
             PointsStorage::Shared {
                 base,
                 changes,
@@ -485,6 +532,18 @@ impl Points {
         match &self.0 {
             PointsStorage::Empty => panic!("points are empty"),
             PointsStorage::Dense(points) => points[index as usize].set(point),
+            PointsStorage::Paged {
+                base,
+                changed_pages,
+            } => {
+                let page_index = index as usize / REPLAY_POINT_PAGE_SIZE;
+                let page = changed_pages[page_index].get_or_init(|| {
+                    let start = page_index * REPLAY_POINT_PAGE_SIZE;
+                    let end = (start + REPLAY_POINT_PAGE_SIZE).min(base.len());
+                    base[start..end].iter().copied().map(Cell::new).collect()
+                });
+                page[index as usize % REPLAY_POINT_PAGE_SIZE].set(point);
+            }
             PointsStorage::Shared {
                 changes,
                 materialized,
@@ -527,6 +586,7 @@ impl Points {
                     cell.set(Point::new_uncalculated());
                 }
             }
+            PointsStorage::Paged { base, .. } => *self = Self::new(base.len()),
             PointsStorage::Shared { base, .. } => *self = Self::new(base.len()),
         }
     }
@@ -536,6 +596,7 @@ impl Points {
         match &self.0 {
             PointsStorage::Empty => PointsIter::Empty,
             PointsStorage::Dense(points) => PointsIter::Dense(points.iter()),
+            PointsStorage::Paged { base, .. } => PointsIter::Shared(self, 0..base.len()),
             PointsStorage::Shared { base, .. } => PointsIter::Shared(self, 0..base.len()),
         }
     }
@@ -561,6 +622,11 @@ impl Points {
     }
 
     fn materialize_dense(&mut self) {
+        if matches!(self.0, PointsStorage::Paged { .. }) {
+            let points = self.iter().map(Cell::new).collect();
+            self.0 = PointsStorage::Dense(points);
+            return;
+        }
         if let PointsStorage::Shared {
             base,
             changes,
@@ -2360,6 +2426,88 @@ pub struct HeuristicBound {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn replay_pages_match_independent_point_vectors(
+            len in 1usize..1024,
+            first_writes in proptest::collection::vec((0usize..2048, any::<bool>()), 0..32),
+            second_writes in proptest::collection::vec((0usize..2048, any::<bool>()), 0..32),
+        ) {
+            let original = Point::new_specific(Specific::Analyzed, Locality::NameBinder);
+            let changed = Point::new_specific(Specific::Calculating, Locality::NameBinder);
+            let source = Points::new(len);
+            let mut expected_first = vec![original; len];
+            for index in 0..len {
+                source.set(index as NodeIndex, original);
+            }
+            let first = source.clone_for_tail_replay();
+            for (index, use_changed) in first_writes {
+                let index = index % len;
+                let value = if use_changed { changed } else { original };
+                first.set(index as NodeIndex, value);
+                expected_first[index] = value;
+            }
+            let second = first.clone_for_tail_replay();
+            let mut expected_second = expected_first.clone();
+            for (index, use_changed) in second_writes {
+                let index = index % len;
+                let value = if use_changed { changed } else { original };
+                second.set(index as NodeIndex, value);
+                expected_second[index] = value;
+            }
+            prop_assert_eq!(source.iter().collect::<Vec<_>>(), vec![original; len]);
+            prop_assert_eq!(first.iter().collect::<Vec<_>>(), expected_first);
+            prop_assert_eq!(second.iter().collect::<Vec<_>>(), expected_second);
+        }
+    }
+
+    #[test]
+    fn replay_pages_keep_versions_independent_across_page_boundaries() {
+        let original = Point::new_specific(Specific::Analyzed, Locality::NameBinder);
+        let changed = Point::new_specific(Specific::Calculating, Locality::NameBinder);
+        let points = Points::new(600);
+        for index in 0..600 {
+            points.set(index, original);
+        }
+        let first = points.clone_for_tail_replay();
+        first.set(255, changed);
+        first.set(256, changed);
+        first.set(599, changed);
+        let second = first.clone_for_tail_replay();
+        second.set(256, original);
+        second.set(511, changed);
+
+        assert_eq!(points.get(255), original);
+        assert_eq!(first.get(255), changed);
+        assert_eq!(first.get(256), changed);
+        assert_eq!(first.get(511), original);
+        assert_eq!(second.get(255), changed);
+        assert_eq!(second.get(256), original);
+        assert_eq!(second.get(511), changed);
+        assert_eq!(second.get(599), changed);
+        assert_eq!(second.iter().count(), 600);
+
+        let backup = second.backup(255..257);
+        second.set(255, original);
+        second.reset_from_backup(&backup);
+        assert_eq!(second.get(255), changed);
+
+        let inferred = Point::new_specific(Specific::Calculating, Locality::Complex);
+        let mut invalidated = second.clone_for_tail_replay();
+        invalidated.set(300, inferred);
+        invalidated.invalidate_references_to(None);
+        assert_eq!(invalidated.get(255), changed);
+        assert_eq!(invalidated.get(300), Point::new_uncalculated());
+        assert_eq!(second.get(300), original);
+
+        let mut reset = second.clone_for_tail_replay();
+        reset.invalidate_full_db();
+        assert_eq!(reset.get(255), Point::new_uncalculated());
+        assert_eq!(second.get(255), changed);
+    }
 
     #[test]
     fn shared_points_keep_file_versions_independent_across_materialization() {
