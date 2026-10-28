@@ -421,6 +421,9 @@ fn bench_type_checking(c: &mut Criterion) {
     "#,
     )
     .into_boxed_str();
+    c.bench_function("clone unchanged file store inputs", |b| {
+        b.iter(|| std::hint::black_box((unchanged_path.clone(), unchanged_code.clone())))
+    });
     c.bench_function("store unchanged file among 1000", |b| {
         b.iter(|| {
             unchanged_project.store_in_memory_file(unchanged_path.clone(), unchanged_code.clone())

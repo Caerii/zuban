@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     ops::BitOrAssign,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use tracing::Level;
@@ -47,6 +50,8 @@ pub struct Vfs<F> {
     pub workspaces: Workspaces,
     pub files: InsertOnlyVec<FileState<F>>,
     in_memory_files: HashMap<PathWithScheme, InMemoryKind>,
+    structure_epoch: AtomicU64,
+    validated_file_epochs: Vec<u64>,
 }
 
 enum InMemoryKind {
@@ -55,12 +60,18 @@ enum InMemoryKind {
 }
 
 impl<F: VfsFile> Vfs<F> {
+    fn advance_structure_epoch(&self) -> u64 {
+        self.structure_epoch.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     pub fn new(handler: Box<dyn VfsHandler>, workspaces: Workspaces) -> Self {
         Self {
             handler,
             workspaces,
             files: Default::default(),
             in_memory_files: Default::default(),
+            structure_epoch: AtomicU64::new(0),
+            validated_file_epochs: Vec::new(),
         }
     }
 
@@ -145,6 +156,8 @@ impl<F: VfsFile> Vfs<F> {
             handler,
             files: files.into(),
             in_memory_files: Default::default(),
+            structure_epoch: AtomicU64::new(0),
+            validated_file_epochs: Vec::new(),
         }
     }
 
@@ -229,8 +242,16 @@ impl<F: VfsFile> Vfs<F> {
         root_path: Arc<NormalizedPath>,
         kind: WorkspaceKind,
     ) -> bool {
-        self.workspaces
-            .push_without_full_access(&*self.handler, file_scheme(), root_path, kind)
+        let added = self.workspaces.push_without_full_access(
+            &*self.handler,
+            file_scheme(),
+            root_path,
+            kind,
+        );
+        if added {
+            self.advance_structure_epoch();
+        }
+        added
     }
 
     pub fn search_path(&self, case_sensitive: bool, path: &PathWithScheme) -> Option<DirOrFile> {
@@ -417,6 +438,19 @@ impl<F: VfsFile> Vfs<F> {
         }
     }
 
+    /// A direct no-op is safe only after this buffer was reconciled with the
+    /// current workspace structure and no intervening VFS mutation occurred.
+    pub fn unchanged_in_memory_file(&self, path: &PathWithScheme, code: &str) -> Option<FileIndex> {
+        let index = self.in_memory_file(path)?;
+        let epoch = self.structure_epoch.load(Ordering::Relaxed);
+        if self.validated_file_epochs.get(index.0 as usize) != Some(&epoch) {
+            return None;
+        }
+        let state = self.file_state(index);
+        (state.code() == Some(code) && state.file_entry.get_file_index() == Some(index))
+            .then_some(index)
+    }
+
     pub fn has_in_memory_path(&self, path: &PathWithScheme) -> bool {
         self.in_memory_files.contains_key(path)
     }
@@ -440,6 +474,7 @@ impl<F: VfsFile> Vfs<F> {
         code: Box<str>,
         new_file: impl FnOnce(FileIndex, &FileEntry, Box<str>) -> F,
     ) -> (Option<FileIndex>, InvalidationResult) {
+        let epoch = self.advance_structure_epoch();
         tracing::info!("Loading in memory file: {}", &path.path);
         let ensured = self
             .workspaces
@@ -477,6 +512,13 @@ impl<F: VfsFile> Vfs<F> {
             if self.file_state(file_index).code() == Some(&code) {
                 // It already exists with the same code, we can therefore skip generating a new
                 // file.
+                self.validated_file_epochs.resize(
+                    self.validated_file_epochs
+                        .len()
+                        .max(file_index.0 as usize + 1),
+                    0,
+                );
+                self.validated_file_epochs[file_index.0 as usize] = epoch;
                 return (Some(file_index), result);
             }
             result |= self.invalidate_and_unload_file(file_index, false);
@@ -522,6 +564,13 @@ impl<F: VfsFile> Vfs<F> {
             }
         }
         result |= self.invalidate_files(Some(file_index), ensured.invalidations, false);
+        self.validated_file_epochs.resize(
+            self.validated_file_epochs
+                .len()
+                .max(file_index.0 as usize + 1),
+            0,
+        );
+        self.validated_file_epochs[file_index.0 as usize] = epoch;
         (Some(file_index), result)
     }
 
@@ -560,6 +609,7 @@ impl<F: VfsFile> Vfs<F> {
         let Some(removed) = self.in_memory_files.remove(path) else {
             return Err("The path is not known to be an in memory file");
         };
+        self.advance_structure_epoch();
         Ok(
             if let Some(on_file_system_code) = self.handler.read_and_watch_file(path) {
                 match removed {
@@ -607,6 +657,7 @@ impl<F: VfsFile> Vfs<F> {
         let Some(removed) = self.in_memory_files.remove(path) else {
             return Err("The path is not known to be an in memory file");
         };
+        self.advance_structure_epoch();
         Ok(self.remove_in_memory_file_without_backing(case_sensitive, removed))
     }
 
@@ -656,11 +707,13 @@ impl<F: VfsFile> Vfs<F> {
         }
         self.workspaces
             .delete_directory(&*self.handler, case_sensitive, dir_path)?;
+        self.advance_structure_epoch();
         Ok(invalidation_result)
     }
 
     pub fn invalidate_path(&mut self, case_sensitive: bool, path: &AbsPath) -> InvalidationResult {
         let _span = tracing::debug_span!("invalidate_path").entered();
+        self.advance_structure_epoch();
         let in_mem_path = PathWithScheme {
             path: self.handler.normalize_path(path).into_owned(),
             scheme: file_scheme(),
@@ -939,6 +992,7 @@ impl<F: VfsFile> Vfs<F> {
     }
 
     pub fn ensure_fallback(&self, path: PathWithScheme) -> Option<DirectoryEntry> {
+        self.advance_structure_epoch();
         self.workspaces.ensure_fallback(&*self.handler, path)
     }
 

@@ -12,8 +12,8 @@ use parsa_python_cst::{NodeIndex, Scope, Tree};
 use rayon::prelude::*;
 use vfs::{
     AbsPath, DirOrFile, Directory, DirectoryEntry, Entries, FileEntry, FileIndex,
-    InvalidationResult, LocalFS, NormalizedPath, PathWithScheme, Vfs, VfsFile as _, VfsHandler,
-    Workspace, WorkspaceKind, WorkspacesBuilder,
+    InvalidatedInMemoryFile, InvalidationResult, LocalFS, NormalizedPath, PathWithScheme, Vfs,
+    VfsFile as _, VfsHandler, Workspace, WorkspaceKind, WorkspacesBuilder,
 };
 
 use crate::{
@@ -1454,6 +1454,21 @@ impl Database {
         code: Box<str>,
         parent: Option<FileIndex>,
     ) -> InvalidationResult {
+        if parent.is_none()
+            && let Some(index) = self.vfs.unchanged_in_memory_file(&path, &code)
+            && self
+                .vfs
+                .file(index)
+                .is_some_and(|file| file.super_file.is_none())
+        {
+            self.vfs
+                .handler
+                .on_invalidated_in_memory_file(InvalidatedInMemoryFile {
+                    path,
+                    maybe_from_outside_of_in_memory_files: false,
+                });
+            return InvalidationResult::InvalidatedFiles;
+        }
         let is_typeshed = TypeshedSymbols::contains_path(self, path.path());
         if is_typeshed {
             self.typeshed_overlay_index.take();

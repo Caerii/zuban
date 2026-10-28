@@ -695,6 +695,8 @@ mod lsp_edit_tests {
         );
         project.store_in_memory_file(path.clone(), "x = 1\n".into());
         let before = notifications.load(Ordering::Relaxed);
+        project.store_in_memory_file(path.clone(), "x = 1\n".into());
+        assert_eq!(notifications.load(Ordering::Relaxed), before + 1);
         project
             .store_file_with_lsp_changes(
                 path.clone(),
@@ -710,7 +712,85 @@ mod lsp_edit_tests {
             )
             .unwrap();
         assert_eq!(project.code_of_in_memory_file(&path), Some("x = 1\n"));
-        assert_eq!(notifications.load(Ordering::Relaxed), before + 1);
+        assert_eq!(notifications.load(Ordering::Relaxed), before + 2);
+    }
+
+    #[test]
+    fn unchanged_buffer_shortcut_expires_after_workspace_change() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/epoch-test.py")),
+        );
+        project.store_in_memory_file(path.clone(), "x = 1\n".into());
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&path, "x = 1\n")
+                .is_some()
+        );
+
+        let workspace_path = project
+            .vfs_handler()
+            .normalize_rc_path(project.vfs_handler().unchecked_abs_path("/epoch-workspace"));
+        assert!(
+            project.db.vfs.add_workspace_without_full_access(
+                workspace_path,
+                vfs::WorkspaceKind::TypeChecking,
+            )
+        );
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&path, "x = 1\n")
+                .is_none()
+        );
+
+        project.store_in_memory_file(path.clone(), "x = 1\n".into());
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&path, "x = 1\n")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn unchanged_buffer_shortcut_survives_many_prepared_files() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let mut first_path = None;
+        for i in 0..1000 {
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path(&format!("/prepared/test{i}.py"))),
+            );
+            project.store_in_memory_file(path.clone(), "x = 1\n".into());
+            first_path.get_or_insert(path);
+        }
+        let first_path = first_path.unwrap();
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&first_path, "x = 1\n")
+                .is_none()
+        );
+        project.store_in_memory_file(first_path.clone(), "x = 1\n".into());
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&first_path, "x = 1\n")
+                .is_some()
+        );
     }
 
     #[test]
