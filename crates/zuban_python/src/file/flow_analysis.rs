@@ -2,6 +2,7 @@ use std::{
     borrow::{Borrow, Cow},
     cell::{Cell, OnceCell, Ref, RefCell, RefMut},
     collections::{HashMap, VecDeque},
+    ops::{Deref, DerefMut},
     rc::Rc,
     sync::Arc,
 };
@@ -49,7 +50,63 @@ use super::{
     utils::func_of_self_symbol,
 };
 
-type Entries = Vec<Entry>;
+#[derive(Debug, Default, Clone)]
+struct Entries(Arc<Vec<Entry>>);
+
+impl From<Vec<Entry>> for Entries {
+    fn from(entries: Vec<Entry>) -> Self {
+        Self(Arc::new(entries))
+    }
+}
+
+impl FromIterator<Entry> for Entries {
+    fn from_iter<T: IntoIterator<Item = Entry>>(iter: T) -> Self {
+        Self::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl Deref for Entries {
+    type Target = Vec<Entry>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Entries {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl IntoIterator for Entries {
+    type Item = Entry;
+    type IntoIter = std::vec::IntoIter<Entry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Arc::try_unwrap(self.0)
+            .unwrap_or_else(|shared| (*shared).clone())
+            .into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Entries {
+    type Item = &'a Entry;
+    type IntoIter = std::slice::Iter<'a, Entry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Entries {
+    type Item = &'a mut Entry;
+    type IntoIter = std::slice::IterMut<'a, Entry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Arc::make_mut(&mut self.0).iter_mut()
+    }
+}
 type ParentUnions = Vec<(FlowKey, UnionType)>;
 
 const MAX_PRECISE_TUPLE_SIZE: usize = 8; // Constant taken from Mypy
@@ -233,7 +290,8 @@ mod flow_context_tests {
                     });
                 }
                 for count in [63, 64, 65, frame.entries.len()] {
-                    let prefix = Frame::new(FrameKind::BaseScope, frame.entries[..count].to_vec());
+                    let prefix =
+                        Frame::new(FrameKind::BaseScope, frame.entries[..count].to_vec().into());
                     for &(root, index, shape) in &queries {
                         let key = make_key(root, index, shape);
                         let expected = prefix
@@ -246,6 +304,9 @@ mod flow_context_tests {
                         );
                     }
                 }
+                frame.ensure_name_index();
+                let shared_frame = frame.clone();
+                let shared_len = shared_frame.entries.len();
                 let appended = make_key(99, 1, 3);
                 frame.entries.push(Entry {
                     key: appended.clone(),
@@ -257,6 +318,11 @@ mod flow_context_tests {
                 prop_assert_eq!(
                     indexed_entry_position(&frame, &project.db, &appended),
                     Some(frame.entries.len() - 1)
+                );
+                prop_assert_eq!(shared_frame.entries.len(), shared_len);
+                prop_assert_eq!(
+                    indexed_entry_position(&shared_frame, &project.db, &appended),
+                    None
                 );
                 frame
                     .entries
@@ -429,8 +495,8 @@ mod flow_context_tests {
                 let flow = FlowAnalysis::default();
                 flow.frames
                     .borrow_mut()
-                    .push(Frame::new(FrameKind::BaseScope, old));
-                flow.overwrite_entries(&project.db, incoming, possibly_modify_ancestors);
+                    .push(Frame::new(FrameKind::BaseScope, old.into()));
+                flow.overwrite_entries(&project.db, incoming.into(), possibly_modify_ancestors);
                 let frames = flow.frames.borrow();
                 let actual = &frames[0].entries;
                 prop_assert_eq!(actual.len(), expected.len());
@@ -741,17 +807,18 @@ struct Frame {
     entries: Entries,
     // Built on demand for larger frames. Other entry updates may append to
     // entries, so the indexed length is kept alongside the map.
-    initial_name_index: RefCell<Option<NameEntryIndex>>,
+    initial_name_index: RefCell<Option<Arc<NameEntryIndex>>>,
     unreachable: bool,
     reported_unreachable: bool,
     kind: FrameKind,
 }
 
-// The module frame immediately before a final bare-name expression. It has no
+// The module frame immediately before a replayable final expression. It has no
 // interior mutability, so an analyzed file can share it with its next version.
 #[derive(Debug, Clone)]
 pub(crate) struct FlowSnapshot {
     entries: Entries,
+    initial_name_index: Option<Arc<NameEntryIndex>>,
     unreachable: bool,
     reported_unreachable: bool,
 }
@@ -768,7 +835,7 @@ impl Frame {
     fn from_snapshot(snapshot: &FlowSnapshot) -> Self {
         Self {
             entries: snapshot.entries.clone(),
-            initial_name_index: RefCell::new(None),
+            initial_name_index: RefCell::new(snapshot.initial_name_index.clone()),
             unreachable: snapshot.unreachable,
             reported_unreachable: snapshot.reported_unreachable,
             kind: FrameKind::BaseScope,
@@ -776,7 +843,11 @@ impl Frame {
     }
     fn ensure_name_index(&self) {
         let mut borrowed = self.initial_name_index.borrow_mut();
-        let index = borrowed.get_or_insert_with(NameEntryIndex::default);
+        let index = borrowed.get_or_insert_with(|| Arc::new(NameEntryIndex::default()));
+        if index.indexed_len == self.entries.len() {
+            return;
+        }
+        let index = Arc::make_mut(index);
         if index.indexed_len > self.entries.len() {
             *index = NameEntryIndex::default();
         }
@@ -822,7 +893,7 @@ impl Frame {
             return true;
         }
         self.ensure_name_index();
-        let index = self.initial_name_index.get_mut().as_mut().unwrap();
+        let index = Arc::make_mut(self.initial_name_index.get_mut().as_mut().unwrap());
         let std::collections::hash_map::Entry::Vacant(vacant) = index.first_positions.entry(name)
         else {
             return false;
@@ -1007,7 +1078,7 @@ impl Frame {
     fn from_type(key: FlowKey, type_: Type) -> Self {
         match type_ {
             Type::Never(_) => Self::new_unreachable(),
-            type_ => Self::new(FrameKind::Conditional, vec![Entry::new(key, type_)]),
+            type_ => Self::new(FrameKind::Conditional, vec![Entry::new(key, type_)].into()),
         }
     }
 
@@ -1094,8 +1165,12 @@ impl FlowAnalysis {
         if frames.len() != 1 || !matches!(frame.kind, FrameKind::BaseScope) {
             return None;
         }
+        if frame.entries.len() >= 64 {
+            frame.ensure_name_index();
+        }
         Some(FlowSnapshot {
             entries: frame.entries.clone(),
+            initial_name_index: frame.initial_name_index.borrow().clone(),
             unreachable: frame.unreachable,
             reported_unreachable: frame.reported_unreachable,
         })
@@ -1340,7 +1415,8 @@ impl FlowAnalysis {
                 } else {
                     let position = tos_frame.entries.len();
                     tos_frame.entries.push(new_entry);
-                    let index = tos_frame.initial_name_index.get_mut().as_mut().unwrap();
+                    let index =
+                        Arc::make_mut(tos_frame.initial_name_index.get_mut().as_mut().unwrap());
                     index.first_positions.insert(link, position);
                     index.indexed_len += 1;
                 }
@@ -1381,7 +1457,8 @@ impl FlowAnalysis {
                 } else {
                     let position = tos_frame.entries.len();
                     tos_frame.entries.push(new_entry);
-                    let index = tos_frame.initial_name_index.get_mut().as_mut().unwrap();
+                    let index =
+                        Arc::make_mut(tos_frame.initial_name_index.get_mut().as_mut().unwrap());
                     index
                         .complex_positions
                         .entry(root)
@@ -1640,7 +1717,7 @@ impl FlowAnalysis {
 
     fn with_new_try_frame(&self, ignores_attribute_error: bool, callable: impl FnOnce()) -> Frame {
         self.try_frames.borrow_mut().push(TryFrame {
-            entries: vec![],
+            entries: vec![].into(),
             ignores_attribute_error,
         });
         callable();
@@ -1835,7 +1912,7 @@ impl FlowAnalysis {
                 add_entry(&mut new_entries, y_entry)
             }
         }
-        Frame::new(FrameKind::Conditional, new_entries)
+        Frame::new(FrameKind::Conditional, new_entries.into())
     }
 
     fn merge_conjunction(
