@@ -306,6 +306,12 @@ fn bench_large_lsp_edit_components(c: &mut Criterion) {
         )
     });
     let tree = Tree::parse(code.clone().into_boxed_str());
+    c.bench_function("scan mypy directives in 100 KiB file", |b| {
+        b.iter(|| std::hint::black_box(tree.mypy_inline_config_directives().count()))
+    });
+    c.bench_function("check initial type ignore in 100 KiB file", |b| {
+        b.iter(|| std::hint::black_box(tree.has_type_ignore_at_start()))
+    });
     let updated = format!("y{}", &code[1..]).into_boxed_str();
     c.bench_function("validate and rebind 100 KiB name edit", |b| {
         b.iter_batched(

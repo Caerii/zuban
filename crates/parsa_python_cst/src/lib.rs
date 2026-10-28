@@ -291,7 +291,7 @@ impl Tree {
     pub fn mypy_inline_config_directives(&self) -> impl Iterator<Item = (CodeIndex, &str)> {
         const PREFIX: &str = "# mypy: ";
         let code = self.code();
-        code.match_indices(PREFIX).filter_map(move |(start, _)| {
+        memchr::memmem::find_iter(code.as_bytes(), PREFIX.as_bytes()).filter_map(move |start| {
             if start != 0 && code.as_bytes()[start - 1] != b'\n' {
                 return None;
             }

@@ -1268,6 +1268,7 @@ dependencies = [
 name = "parsa_python_cst"
 version = "0.10.1"
 dependencies = [
+ "memchr",
  "num-bigint",
  "num-traits",
  "parsa_python",

@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 parsa_python.workspace = true
 utils.workspace = true
+memchr.workspace = true
 
 num-bigint.workspace = true
 num-traits.workspace = true
