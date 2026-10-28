@@ -710,6 +710,7 @@ pub struct PanicRecovery {
 
 #[cfg(test)]
 mod lsp_edit_tests {
+    use std::cell::RefCell;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1185,6 +1186,21 @@ mod lsp_edit_tests {
         );
     }
 
+    thread_local! {
+        // Keep the loaded typeshed resources on this test thread. Each derived
+        // project still has its own in-memory files, bindings, and diagnostics.
+        static PROPERTY_BASE: RefCell<Option<Project>> = const { RefCell::new(None) };
+    }
+
+    fn property_project(options: ProjectOptions) -> Project {
+        PROPERTY_BASE.with_borrow_mut(|base| {
+            let base = base.get_or_insert_with(|| {
+                Project::without_watcher(options.clone(), RunCause::TypeChecking)
+            });
+            base.try_to_reuse_project_resources_for_tests(options)
+        })
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
         #[test]
@@ -1199,7 +1215,7 @@ mod lsp_edit_tests {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
             options.settings.add_global_packages_default = false;
-            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let mut project = property_project(options.clone());
             let vfs = project.vfs_handler();
             let path = PathWithScheme::with_file_scheme(
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-conditional-edit.py")),
@@ -1254,7 +1270,7 @@ mod lsp_edit_tests {
                     column: pos.character as usize,
                 },
             ).unwrap();
-            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+            let mut fresh = property_project(options);
             fresh.store_in_memory_file(path.clone(), updated.clone().into_boxed_str());
             prop_assert_eq!(project.code_of_in_memory_file(&path).unwrap(), updated.as_str());
             prop_assert_eq!(
@@ -1272,7 +1288,7 @@ mod lsp_edit_tests {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
             options.settings.add_global_packages_default = false;
-            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let mut project = property_project(options.clone());
             let vfs = project.vfs_handler();
             let path = PathWithScheme::with_file_scheme(
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-chain-edit.py")),
@@ -1307,7 +1323,7 @@ mod lsp_edit_tests {
                     column: pos.character as usize,
                 },
             ).unwrap();
-            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+            let mut fresh = property_project(options);
             fresh.store_in_memory_file(path.clone(), updated.clone().into_boxed_str());
             let actual_diagnostics = format!("{:?}", project.document(&path).unwrap().diagnostics());
             let expected_diagnostics = format!("{:?}", fresh.document(&path).unwrap().diagnostics());
@@ -1344,7 +1360,7 @@ mod lsp_edit_tests {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
             options.settings.add_global_packages_default = false;
-            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let mut project = property_project(options.clone());
             let vfs = project.vfs_handler();
             let path = PathWithScheme::with_file_scheme(
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-reference-binding.py")),
@@ -1398,7 +1414,7 @@ mod lsp_edit_tests {
                     column: pos.character as usize,
                 },
             ).unwrap();
-            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+            let mut fresh = property_project(options);
             fresh.store_in_memory_file(path.clone(), updated.clone().into_boxed_str());
 
             let actual_index = project.db.vfs.in_memory_file(&path).unwrap();
@@ -1428,7 +1444,7 @@ mod lsp_edit_tests {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
             options.settings.add_global_packages_default = false;
-            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let mut project = property_project(options.clone());
             let vfs = project.vfs_handler();
             let path = PathWithScheme::with_file_scheme(
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-repeated-reference-edits.py")),
@@ -1442,7 +1458,7 @@ mod lsp_edit_tests {
             let mut references = ["alpha"; 4];
             project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
             let _ = project.document(&path).unwrap().diagnostics();
-            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+            let mut fresh = property_project(options);
 
             for (step, (slot, replacement_kind)) in edits.into_iter().enumerate() {
                 let replacement = ["alpha", "delta", "beta_name", "unknown_long"][replacement_kind];
@@ -1508,7 +1524,7 @@ mod lsp_edit_tests {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
             options.settings.add_global_packages_default = false;
-            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let mut project = property_project(options.clone());
             let vfs = project.vfs_handler();
             let path = PathWithScheme::with_file_scheme(
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-repeated-conditional-edits.py")),
@@ -1551,7 +1567,7 @@ mod lsp_edit_tests {
                     initial.len(),
                 ).is_some());
             let _ = project.document(&path).unwrap().diagnostics();
-            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+            let mut fresh = property_project(options);
 
             let mut edits = edits;
             // Start with an eligible edit to the final statement. Replay is
