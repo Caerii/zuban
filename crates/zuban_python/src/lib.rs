@@ -1502,7 +1502,7 @@ mod lsp_edit_tests {
             branch_count in 210usize..240,
             string_else in any::<bool>(),
             omit_last_else in any::<bool>(),
-            bare_tail in any::<bool>(),
+            tail_kind in 0usize..3,
             edits in prop::collection::vec((0usize..3, 0usize..5), 2..5),
         ) {
             let mut options = ProjectOptions::default();
@@ -1536,14 +1536,14 @@ mod lsp_edit_tests {
             let previous_name = format!("name_{}", branch_count - 2);
             let mut references = [initial.as_str(); 3];
             for _ in 0..references.len() {
-                if bare_tail {
-                    code.push_str(&format!("{initial}\n"));
-                } else {
-                    code.push_str(&format!("{initial} + box.value\n"));
+                match tail_kind {
+                    0 => code.push_str(&format!("{initial}\n")),
+                    1 => code.push_str(&format!("{initial} + 1\n")),
+                    _ => code.push_str(&format!("{initial} + box.value\n")),
                 }
             }
             project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
-            if bare_tail {
+            if tail_kind < 2 {
                 let file_index = project.db.vfs.in_memory_file(&path).unwrap();
                 prop_assert!(project.db.loaded_python_file(file_index)
                     .reference_binding_candidate(
@@ -1556,9 +1556,9 @@ mod lsp_edit_tests {
             let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
 
             let mut edits = edits;
-            if bare_tail {
-                // Start with an eligible edit to the final statement, so the
-                // property test always exercises replay in these cases.
+            if tail_kind < 2 {
+                // Start with an eligible edit to the final statement. Replay
+                // is possible when the original expression has no diagnostic.
                 edits[0] = (2, 4);
                 edits[1] = (2, 0);
             }
@@ -1591,7 +1591,11 @@ mod lsp_edit_tests {
                         column: pos.character as usize,
                     },
                 ).unwrap();
-                if bare_tail && !omit_last_else && step < 2 {
+                if tail_kind < 2
+                    && !omit_last_else
+                    && (tail_kind == 0 || !string_else)
+                    && step < 2
+                {
                     let file_index = project.db.vfs.in_memory_file(&path).unwrap();
                     let file = project.db.loaded_python_file(file_index);
                     let first_stmt = file.tree.root().iter_stmt_likes().next().unwrap();

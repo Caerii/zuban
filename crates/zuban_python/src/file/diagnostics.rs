@@ -160,7 +160,10 @@ impl Inference<'_, '_, '_> {
                 );
                 debug_assert!(self.i_s.is_file_context(), "{:?}", self.i_s);
                 let indent = debug_indent();
-                let tail_stmt_index = self.file.bare_tail_name_stmt().map(|(index, _)| index);
+                let tail_stmt_index = self
+                    .file
+                    .replayable_tail_name_stmt()
+                    .map(|(index, _)| index);
                 let replay_snapshot = self.file.tail_flow_snapshot.read().unwrap().clone();
                 flow_analysis.with_frame_that_exports_widened_entries_from(
                     self.i_s,

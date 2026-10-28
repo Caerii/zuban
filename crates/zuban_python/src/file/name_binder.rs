@@ -29,6 +29,25 @@ pub const FUNC_TO_RETURN_OR_YIELD_DIFF: u32 = 1;
 pub const FUNC_TO_TYPE_VAR_DIFF: i64 = NAME_TO_FUNCTION_DIFF as i64 + 1;
 const FUNC_TO_PARENT_DIFF: u32 = NAME_TO_FUNCTION_DIFF + 2;
 
+pub(super) fn simple_name_plus_int<'db>(expr: Expression<'db>) -> Option<Name<'db>> {
+    let ExpressionContent::ExpressionPart(ExpressionPart::Sum(sum)) = expr.unpack() else {
+        return None;
+    };
+    let operation = sum.as_operation();
+    if operation.infos.operand != "+"
+        || !matches!(
+            operation.right.maybe_unpacked_atom(),
+            Some(AtomContent::Int(_))
+        )
+    {
+        return None;
+    }
+    let AtomContent::Name(name) = operation.left.maybe_unpacked_atom()? else {
+        return None;
+    };
+    Some(name)
+}
+
 #[derive(Debug, Copy, Clone)]
 enum NameBinderKind<'db> {
     Global,
@@ -487,12 +506,17 @@ impl<'db> NameBinder<'db> {
                 }
                 StmtLikeContent::StarExpressions(s) => {
                     if matches!(self.kind, NameBinderKind::Global)
-                        && let Some(AtomContent::Name(name)) = s
-                            .maybe_simple_expression()
-                            .and_then(|expr| expr.maybe_unpacked_atom())
-                        && s.as_code() == name.as_str()
+                        && let Some(expr) = s.maybe_simple_expression()
                     {
-                        self.standalone_module_references.push(name.index());
+                        let simple_name = match expr.maybe_unpacked_atom() {
+                            Some(AtomContent::Name(name)) if s.as_code() == name.as_str() => {
+                                Some(name)
+                            }
+                            _ => simple_name_plus_int(expr),
+                        };
+                        if let Some(name) = simple_name {
+                            self.standalone_module_references.push(name.index());
+                        }
                     }
                     self.index_non_block_node(&s, ordered)
                 }

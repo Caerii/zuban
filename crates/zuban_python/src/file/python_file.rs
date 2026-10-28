@@ -21,7 +21,7 @@ use super::{
     flow_analysis::{DelayedDiagnostic, FlowSnapshot},
     imports::is_package_name,
     inference::Inference,
-    name_binder::{DbInfos, NameBinder},
+    name_binder::{DbInfos, NameBinder, simple_name_plus_int},
     name_resolution::{ModuleAccessDetail, NameResolution},
 };
 use crate::{
@@ -405,13 +405,15 @@ impl fmt::Debug for PythonFile {
 }
 
 impl<'db> PythonFile {
-    pub(super) fn bare_tail_name_stmt(&self) -> Option<(NodeIndex, Name<'_>)> {
+    pub(super) fn replayable_tail_name_stmt(&self) -> Option<(NodeIndex, Name<'_>)> {
         self.binding_snapshot.as_ref()?;
         let last = self.tree.root().iter_stmt_likes().last()?;
-        let AtomContent::Name(name) = last.node.maybe_simple_expr()?.maybe_unpacked_atom()? else {
-            return None;
+        let expr = last.node.maybe_simple_expr()?;
+        let name = match expr.maybe_unpacked_atom() {
+            Some(AtomContent::Name(name)) => name,
+            _ => simple_name_plus_int(expr)?,
         };
-        (self.tree.code().get(name.end() as usize..) == Some("\n"))
+        (self.tree.code().get(expr.end() as usize..) == Some("\n"))
             .then_some((last.parent_index, name))
     }
 
@@ -428,7 +430,7 @@ impl<'db> PythonFile {
         {
             return None;
         }
-        let (tail_stmt_index, tail_name) = self.bare_tail_name_stmt()?;
+        let (tail_stmt_index, tail_name) = self.replayable_tail_name_stmt()?;
         if tail_name.index() != name_index || tail_stmt_index > name_index {
             return None;
         }
