@@ -5560,6 +5560,47 @@ pub enum UnpackedError<'db> {
 #[cfg(test)]
 mod incremental_name_tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn accepted_partial_name_edits_match_fresh_parse(
+            name in "[a-z][a-z0-9_]{1,12}",
+            context in 0u8..5,
+            position in 0usize..16,
+            replacement in prop::sample::select(vec!['a', 'z', '0', '_', '\'', '"', '\\']),
+        ) {
+            let (prefix, suffix) = match context {
+                0 => ("", " = 1\n"),
+                1 => ("obj.", " = 1\n"),
+                2 => ("def ", "():\n    pass\n"),
+                3 => ("f'{", "}'\n"),
+                _ => ("if ", ":\n    pass\n"),
+            };
+            let old = format!("{prefix}{name}{suffix}");
+            let start = prefix.len() + position % name.len();
+            let end = start + 1;
+            let replacement = replacement.to_string();
+            let tree = Tree::parse(old.clone().into_boxed_str());
+            prop_assume!(tree.can_reuse_syntax_for_name_edit(start, end, &replacement));
+
+            let updated = format!("{}{}{}", &old[..start], replacement, &old[end..]);
+            let reused = tree
+                .with_same_length_name_edit(start, end, updated.clone().into_boxed_str())
+                .unwrap();
+            let fresh = Tree::parse(updated.into_boxed_str());
+            prop_assert_eq!(reused.length(), fresh.length());
+            for index in 0..reused.length() as NodeIndex {
+                let left = reused.0.node_by_index(index);
+                let right = fresh.0.node_by_index(index);
+                prop_assert_eq!(
+                    (left.type_(), left.start(), left.end(), left.parent().map(|node| node.index)),
+                    (right.type_(), right.start(), right.end(), right.parent().map(|node| node.index)),
+                );
+            }
+        }
+    }
 
     #[test]
     fn reused_name_nodes_match_fresh_parse() {

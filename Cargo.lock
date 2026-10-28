@@ -1383,6 +1383,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "parsa_python",
+ "proptest",
  "tracing",
  "utils",
 ]
