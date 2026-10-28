@@ -49,12 +49,40 @@ fn collect_newlines_sparse(bytes: &[u8]) -> Vec<CodeIndex> {
     lines
 }
 
+fn collect_newlines(code: &str) -> Vec<CodeIndex> {
+    let bytes = code.as_bytes();
+    // Frequent line breaks are cheaper to scan sequentially. For long
+    // lines, skip directly from one break to the next.
+    let dense = if bytes.len() < 1024 {
+        true
+    } else {
+        let sample_len = 256;
+        let starts = [
+            0,
+            bytes.len() / 2 - sample_len / 2,
+            bytes.len() - sample_len,
+        ];
+        starts
+            .into_iter()
+            .map(|start| {
+                memchr::memchr2_iter(b'\r', b'\n', &bytes[start..start + sample_len]).count()
+            })
+            .sum::<usize>()
+            >= 72
+    };
+    if dense {
+        collect_newlines_scalar(bytes)
+    } else {
+        collect_newlines_sparse(bytes)
+    }
+}
+
 pub fn split_lines(code: &str) -> impl Iterator<Item = &str> {
     NEWLINES.split(code)
 }
 
 #[derive(Clone)]
-pub(crate) struct NewlineIndices(OnceLock<Arc<[CodeIndex]>>);
+pub(crate) struct NewlineIndices(OnceLock<Arc<Vec<CodeIndex>>>);
 
 impl NewlineIndices {
     pub fn new() -> Self {
@@ -63,14 +91,19 @@ impl NewlineIndices {
 
     /// Reuse known line starts when a single edit changes bytes without
     /// changing any newline. The caller verifies that condition.
+    /// Transfer the old file's line starts into the edited file when this is
+    /// the sole owner. Shared indices are copied before mutation.
     pub fn shifted_after_edit(
-        &self,
+        self,
         old_code: &str,
         end: usize,
         removed_len: usize,
         inserted_len: usize,
     ) -> Option<Self> {
-        let mut lines = self.lines(old_code).to_vec();
+        let mut lines = match self.0.into_inner() {
+            Some(lines) => Arc::try_unwrap(lines).unwrap_or_else(|shared| (*shared).clone()),
+            None => collect_newlines(old_code),
+        };
         let first_shifted = lines.partition_point(|offset| *offset as usize <= end);
         for offset in &mut lines[first_shifted..] {
             let shifted = (*offset as usize)
@@ -78,39 +111,11 @@ impl NewlineIndices {
                 .checked_add(inserted_len)?;
             *offset = shifted.try_into().ok()?;
         }
-        Some(Self(OnceLock::from(Arc::from(lines))))
+        Some(Self(OnceLock::from(Arc::new(lines))))
     }
 
     fn lines(&self, code: &str) -> &[CodeIndex] {
-        self.0.get_or_init(|| {
-            let bytes = code.as_bytes();
-            // Frequent line breaks are cheaper to scan sequentially. For long
-            // lines, skip directly from one break to the next.
-            let dense = if bytes.len() < 1024 {
-                true
-            } else {
-                let sample_len = 256;
-                let starts = [
-                    0,
-                    bytes.len() / 2 - sample_len / 2,
-                    bytes.len() - sample_len,
-                ];
-                starts
-                    .into_iter()
-                    .map(|start| {
-                        memchr::memchr2_iter(b'\r', b'\n', &bytes[start..start + sample_len])
-                            .count()
-                    })
-                    .sum::<usize>()
-                    >= 72
-            };
-            let lines = if dense {
-                collect_newlines_scalar(bytes)
-            } else {
-                collect_newlines_sparse(bytes)
-            };
-            Arc::from(lines)
-        })
+        self.0.get_or_init(|| Arc::new(collect_newlines(code)))
     }
 
     pub fn line_column_to_safe_byte(
@@ -373,6 +378,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shifted_indices_transfer_unique_storage_and_copy_shared_storage() {
+        let old = "x = 1\n".repeat(1_024);
+        let new = format!("yy{}", &old[1..]);
+
+        let unique = NewlineIndices::new();
+        unique.lines(&old);
+        let original_storage = unique.0.get().unwrap().as_ptr();
+        let shifted = unique.shifted_after_edit(&old, 1, 1, 2).unwrap();
+        assert_eq!(shifted.0.get().unwrap().as_ptr(), original_storage);
+        assert_eq!(shifted.lines(&new), NewlineIndices::new().lines(&new));
+
+        let shared = NewlineIndices::new();
+        shared.lines(&old);
+        let retained = shared.clone();
+        let shared_storage = shared.0.get().unwrap().as_ptr();
+        let shifted = shared.shifted_after_edit(&old, 1, 1, 2).unwrap();
+        assert_ne!(shifted.0.get().unwrap().as_ptr(), shared_storage);
+        assert_eq!(retained.lines(&old), NewlineIndices::new().lines(&old));
+        assert_eq!(shifted.lines(&new), NewlineIndices::new().lines(&new));
+    }
+
+    #[test]
     fn long_document_shifted_indices_match_fresh_scan() {
         let code = "x = 1\n".repeat(16_000);
         let indices = NewlineIndices::new();
@@ -381,6 +408,7 @@ mod tests {
             let replacement = "yy";
             let updated = format!("{}{}{}", &code[..start], replacement, &code[end..]);
             let shifted = indices
+                .clone()
                 .shifted_after_edit(&code, end, end - start, replacement.len())
                 .unwrap();
             assert_eq!(
@@ -445,6 +473,7 @@ mod tests {
                         }
                         let new = format!("{}{}{}", &old[..start], inserted, &old[end..]);
                         let shifted = old_indices
+                            .clone()
                             .shifted_after_edit(old, end, end - start, inserted.len())
                             .unwrap();
                         assert_eq!(

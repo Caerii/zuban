@@ -159,22 +159,33 @@ impl Project {
         )?;
         match applied.code {
             std::borrow::Cow::Owned(code) => {
+                let parent = file.super_file.map(|s| s.file);
                 let updated_line_indices = match applied.line_index_update {
                     lsp_utils::LineIndexUpdate::Reuse => Some(file.newline_indices.clone()),
                     lsp_utils::LineIndexUpdate::Shift {
                         end,
                         removed_len,
                         inserted_len,
-                    } => file.newline_indices.shifted_after_edit(
-                        old_code,
-                        end,
-                        removed_len,
-                        inserted_len,
-                    ),
+                    } => {
+                        let file = self
+                            .db
+                            .vfs
+                            .file_mut(index)
+                            .expect("open in-memory file must remain loaded");
+                        let old_indices = std::mem::replace(
+                            &mut file.newline_indices,
+                            lines::NewlineIndices::new(),
+                        );
+                        old_indices.shifted_after_edit(
+                            file.tree.code(),
+                            end,
+                            removed_len,
+                            inserted_len,
+                        )
+                    }
                     lsp_utils::LineIndexUpdate::Rebuild => None,
                 };
-                self.db
-                    .store_in_memory_file(path, code.into(), file.super_file.map(|s| s.file));
+                self.db.store_in_memory_file(path, code.into(), parent);
                 if let Some(line_indices) = updated_line_indices {
                     self.db
                         .vfs
