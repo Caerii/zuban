@@ -1543,25 +1543,21 @@ mod lsp_edit_tests {
                 }
             }
             project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
-            if tail_kind < 2 {
-                let file_index = project.db.vfs.in_memory_file(&path).unwrap();
-                prop_assert!(project.db.loaded_python_file(file_index)
-                    .reference_binding_candidate(
-                        first_reference_start,
-                        first_reference_start + initial.len(),
-                        initial.len(),
-                    ).is_some());
-            }
+            let file_index = project.db.vfs.in_memory_file(&path).unwrap();
+            prop_assert!(project.db.loaded_python_file(file_index)
+                .reference_binding_candidate(
+                    first_reference_start,
+                    first_reference_start + initial.len(),
+                    initial.len(),
+                ).is_some());
             let _ = project.document(&path).unwrap().diagnostics();
             let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
 
             let mut edits = edits;
-            if tail_kind < 2 {
-                // Start with an eligible edit to the final statement. Replay
-                // is possible when the original expression has no diagnostic.
-                edits[0] = (2, 4);
-                edits[1] = (2, 0);
-            }
+            // Start with an eligible edit to the final statement. Replay is
+            // possible when the original expression has no diagnostic.
+            edits[0] = (2, 4);
+            edits[1] = (2, 0);
 
             for (step, (slot, replacement_kind)) in edits.into_iter().enumerate() {
                 let previous = references[slot];
@@ -1591,8 +1587,7 @@ mod lsp_edit_tests {
                         column: pos.character as usize,
                     },
                 ).unwrap();
-                if tail_kind < 2
-                    && !omit_last_else
+                if !omit_last_else
                     && (tail_kind == 0 || !string_else)
                     && step < 2
                 {

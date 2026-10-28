@@ -29,17 +29,23 @@ pub const FUNC_TO_RETURN_OR_YIELD_DIFF: u32 = 1;
 pub const FUNC_TO_TYPE_VAR_DIFF: i64 = NAME_TO_FUNCTION_DIFF as i64 + 1;
 const FUNC_TO_PARENT_DIFF: u32 = NAME_TO_FUNCTION_DIFF + 2;
 
-pub(super) fn simple_name_plus_int<'db>(expr: Expression<'db>) -> Option<Name<'db>> {
+pub(super) fn simple_name_plus_read<'db>(expr: Expression<'db>) -> Option<Name<'db>> {
     let ExpressionContent::ExpressionPart(ExpressionPart::Sum(sum)) = expr.unpack() else {
         return None;
     };
     let operation = sum.as_operation();
-    if operation.infos.operand != "+"
-        || !matches!(
-            operation.right.maybe_unpacked_atom(),
-            Some(AtomContent::Int(_))
-        )
-    {
+    if operation.infos.operand != "+" {
+        return None;
+    }
+    let read_only_right = match operation.right {
+        ExpressionPart::Atom(atom) => matches!(atom.unpack(), AtomContent::Int(_)),
+        ExpressionPart::Primary(primary) => {
+            matches!(primary.first(), PrimaryOrAtom::Atom(atom) if matches!(atom.unpack(), AtomContent::Name(_)))
+                && matches!(primary.second(), PrimaryContent::Attribute(_))
+        }
+        _ => false,
+    };
+    if !read_only_right {
         return None;
     }
     let AtomContent::Name(name) = operation.left.maybe_unpacked_atom()? else {
@@ -512,7 +518,7 @@ impl<'db> NameBinder<'db> {
                             Some(AtomContent::Name(name)) if s.as_code() == name.as_str() => {
                                 Some(name)
                             }
-                            _ => simple_name_plus_int(expr),
+                            _ => simple_name_plus_read(expr),
                         };
                         if let Some(name) = simple_name {
                             self.standalone_module_references.push(name.index());

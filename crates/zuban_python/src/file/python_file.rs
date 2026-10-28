@@ -21,7 +21,7 @@ use super::{
     flow_analysis::{DelayedDiagnostic, FlowSnapshot},
     imports::is_package_name,
     inference::Inference,
-    name_binder::{DbInfos, NameBinder, simple_name_plus_int},
+    name_binder::{DbInfos, NameBinder, simple_name_plus_read},
     name_resolution::{ModuleAccessDetail, NameResolution},
 };
 use crate::{
@@ -411,7 +411,7 @@ impl<'db> PythonFile {
         let expr = last.node.maybe_simple_expr()?;
         let name = match expr.maybe_unpacked_atom() {
             Some(AtomContent::Name(name)) => name,
-            _ => simple_name_plus_int(expr)?,
+            _ => simple_name_plus_read(expr)?,
         };
         (self.tree.code().get(expr.end() as usize..) == Some("\n"))
             .then_some((last.parent_index, name))
