@@ -967,6 +967,61 @@ mod lsp_edit_tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
         #[test]
+        fn conditional_name_edit_matches_fresh_analysis(
+            count in 120usize..151,
+            string_else in any::<bool>(),
+            missing_last_else in any::<bool>(),
+        ) {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-conditional-edit.py")),
+            );
+            let mut code = String::from("guard = bool(1)\nif guard:\n");
+            for index in 0..count {
+                code.push_str(&format!("    name_{index} = {index}\n"));
+            }
+            code.push_str("else:\n");
+            for index in 0..count {
+                if missing_last_else && index == count - 1 { continue; }
+                if string_else {
+                    code.push_str(&format!("    name_{index} = 'x'\n"));
+                } else {
+                    code.push_str(&format!("    name_{index} = {index}\n"));
+                }
+            }
+            let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
+            let current = format!("name_{}", count - 1);
+            let previous = format!("name_{}", count - 2);
+            code.push_str(&format!("{current} + 1\n"));
+            let updated = code.replace(&format!("\n{current} + 1\n"), &format!("\n{previous} + 1\n"));
+            project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+            let _ = project.document(&path).unwrap().diagnostics();
+            project.store_file_with_lsp_changes(
+                path.clone(),
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(Position::new(line, 0), Position::new(line, current.len() as u32))),
+                    range_length: None,
+                    text: previous.clone(),
+                }],
+                |pos| InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            ).unwrap();
+            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+            fresh.store_in_memory_file(path.clone(), updated.clone().into_boxed_str());
+            prop_assert_eq!(project.code_of_in_memory_file(&path).unwrap(), updated.as_str());
+            prop_assert_eq!(
+                format!("{:?}", project.document(&path).unwrap().diagnostics()),
+                format!("{:?}", fresh.document(&path).unwrap().diagnostics()),
+            );
+        }
+
+        #[test]
         fn dependency_chain_edit_matches_fresh_analysis(
             chain_len in 65usize..129,
             replacement_kind in 0usize..4,

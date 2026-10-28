@@ -1,7 +1,7 @@
 use std::{
     borrow::{Borrow, Cow},
     cell::{Cell, OnceCell, Ref, RefCell, RefMut},
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     rc::Rc,
     sync::Arc,
 };
@@ -424,15 +424,40 @@ enum FrameKind {
 #[derive(Debug, Clone)]
 struct Frame {
     entries: Entries,
-    // Built on demand for larger frames. Other entry updates may
-    // append to entries, so the indexed length is kept alongside the set.
-    initial_name_index: Option<(usize, HashSet<PointLink>)>,
+    // Built on demand for larger frames. Other entry updates may append to
+    // entries, so the indexed length is kept alongside the map.
+    initial_name_index: Option<NameEntryIndex>,
     unreachable: bool,
     reported_unreachable: bool,
     kind: FrameKind,
 }
 
+#[derive(Debug, Clone, Default)]
+struct NameEntryIndex {
+    indexed_len: usize,
+    first_positions: HashMap<PointLink, usize>,
+    has_non_name: bool,
+}
+
 impl Frame {
+    fn ensure_name_index(&mut self) -> &mut NameEntryIndex {
+        let index = self
+            .initial_name_index
+            .get_or_insert_with(NameEntryIndex::default);
+        if index.indexed_len > self.entries.len() {
+            *index = NameEntryIndex::default();
+        }
+        for (position, entry) in self.entries.iter().enumerate().skip(index.indexed_len) {
+            if let FlowKey::Name(link) = entry.key {
+                index.first_positions.entry(link).or_insert(position);
+            } else {
+                index.has_non_name = true;
+            }
+        }
+        index.indexed_len = self.entries.len();
+        index
+    }
+
     fn insert_initial_name_if_absent(&mut self, name: PointLink) -> bool {
         if self.entries.len() < 64 {
             self.initial_name_index = None;
@@ -452,22 +477,10 @@ impl Frame {
             });
             return true;
         }
-        let (indexed_len, names) = self
-            .initial_name_index
-            .get_or_insert_with(|| (0, HashSet::new()));
-        if *indexed_len > self.entries.len() {
-            names.clear();
-            *indexed_len = 0;
-        }
-        for entry in &self.entries[*indexed_len..] {
-            if let FlowKey::Name(link) = entry.key {
-                names.insert(link);
-            }
-        }
-        *indexed_len = self.entries.len();
-        if !names.insert(name) {
+        if self.ensure_name_index().first_positions.contains_key(&name) {
             return false;
         }
+        let position = self.entries.len();
         self.entries.push(Entry {
             key: FlowKey::Name(name),
             type_: EntryKind::OriginalDeclaration,
@@ -475,7 +488,9 @@ impl Frame {
             deleted: false,
             widens: false,
         });
-        *indexed_len += 1;
+        let index = self.initial_name_index.as_mut().unwrap();
+        index.first_positions.insert(name, position);
+        index.indexed_len += 1;
         true
     }
 
@@ -785,20 +800,40 @@ impl FlowAnalysis {
         first_frame: &mut Frame,
         other_frame: &mut Frame,
     ) {
+        let other_names: HashMap<PointLink, usize> = if other_frame.entries.len() >= 64 {
+            let mut names = HashMap::with_capacity(other_frame.entries.len());
+            for (index, entry) in other_frame.entries.iter().enumerate() {
+                if let FlowKey::Name(link) = entry.key {
+                    names.entry(link).or_insert(index);
+                }
+            }
+            names
+        } else {
+            HashMap::new()
+        };
         'outer: for first_entry in &first_frame.entries {
             if first_entry.modifies_ancestors {
-                for other_entry in &mut other_frame.entries {
-                    if first_entry.key.equals(i_s.db, &other_entry.key) {
-                        if other_entry.modifies_ancestors {
-                            self.overwrite_entry(i_s, first_entry.union_of_refs(i_s, other_entry));
-                        } else {
-                            self.overwrite_entry(i_s, other_entry.union_of_refs(i_s, first_entry));
-                        }
-
-                        // Assign false to make sure it is not handled again from the other side.
-                        other_entry.modifies_ancestors = false;
-                        continue 'outer;
+                let matched_index = if let FlowKey::Name(link) = first_entry.key
+                    && !other_names.is_empty()
+                {
+                    other_names.get(&link).copied()
+                } else {
+                    other_frame
+                        .entries
+                        .iter()
+                        .position(|entry| first_entry.key.equals(i_s.db, &entry.key))
+                };
+                if let Some(index) = matched_index {
+                    let other_entry = &mut other_frame.entries[index];
+                    if other_entry.modifies_ancestors {
+                        self.overwrite_entry(i_s, first_entry.union_of_refs(i_s, other_entry));
+                    } else {
+                        self.overwrite_entry(i_s, other_entry.union_of_refs(i_s, first_entry));
                     }
+
+                    // Assign false to make sure it is not handled again from the other side.
+                    other_entry.modifies_ancestors = false;
+                    continue 'outer;
                 }
                 self.overwrite_entry(
                     i_s,
@@ -842,6 +877,31 @@ impl FlowAnalysis {
             return;
         }
         let mut tos_frame = self.tos_frame();
+        if let FlowKey::Name(link) = &new_entry.key
+            && tos_frame.entries.len() >= 64
+        {
+            let link = *link;
+            let index = tos_frame.ensure_name_index();
+            if !index.has_non_name {
+                let existing = index.first_positions.get(&link).copied();
+                if let Some(position) = existing {
+                    let entry = &mut tos_frame.entries[position];
+                    if self.accumulating_types.get() > 0 {
+                        entry.type_ = entry.simplified_union(i_s, &new_entry);
+                        entry.widens |= new_entry.widens;
+                    } else {
+                        *entry = new_entry;
+                    }
+                } else {
+                    let position = tos_frame.entries.len();
+                    tos_frame.entries.push(new_entry);
+                    let index = tos_frame.initial_name_index.as_mut().unwrap();
+                    index.first_positions.insert(link, position);
+                    index.indexed_len += 1;
+                }
+                return;
+            }
+        }
         tos_frame.initial_name_index = None;
         invalidate_child_entries(&mut tos_frame.entries, i_s.db, &new_entry.key);
         let entries = &mut tos_frame.entries;

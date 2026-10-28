@@ -365,6 +365,57 @@ fn bench_dependency_chain_reference_edit(c: &mut Criterion, source_edit: bool) {
     });
 }
 
+fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize) {
+    let (mut project, paths) = prepare_independent_files(1);
+    let path = paths[0].clone();
+    let mut code = String::from("guard = bool(1)\nif guard:\n");
+    for index in 0..count {
+        code.push_str(&format!("    name_{index} = {index}\n"));
+    }
+    code.push_str("else:\n");
+    for index in 0..count {
+        code.push_str(&format!("    name_{index} = {index}\n"));
+    }
+    let current = format!("name_{}", count - 1);
+    let previous = format!("name_{}", count - 2);
+    code.push_str(&format!("{current} + 1\n"));
+    project.store_in_memory_file(path.clone(), code.into_boxed_str());
+    let mut use_previous = false;
+    c.bench_function(
+        &format!(
+            "reference edit and diagnostics in {}k-name conditional",
+            count / 1_000
+        ),
+        |b| {
+            b.iter(|| {
+                let replacement = if use_previous { &current } else { &previous };
+                project
+                    .store_file_with_lsp_changes(
+                        path.clone(),
+                        vec![TextDocumentContentChangeEvent {
+                            range: Some(Range::new(
+                                Position::new((2 * count + 3) as u32, 0),
+                                Position::new((2 * count + 3) as u32, current.len() as u32),
+                            )),
+                            range_length: None,
+                            text: replacement.into(),
+                        }],
+                        |pos| InputPosition::Utf16CodeUnits {
+                            line: pos.line as usize,
+                            column: pos.character as usize,
+                        },
+                    )
+                    .unwrap();
+                use_previous = !use_previous;
+                let mut document = project.document(&path).unwrap();
+                let diagnostics = document.diagnostics();
+                assert!(diagnostics.is_empty());
+                std::hint::black_box(diagnostics);
+            })
+        },
+    );
+}
+
 fn bench_length_changing_lsp_edit(c: &mut Criterion, name: &str, code: String) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
@@ -743,6 +794,8 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_large_reference_lsp_edit(c, true, true);
     bench_dependency_chain_reference_edit(c, false);
     bench_dependency_chain_reference_edit(c, true);
+    bench_conditional_definitions_edit(c, 1_000);
+    bench_conditional_definitions_edit(c, 2_000);
     bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,
