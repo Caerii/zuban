@@ -241,6 +241,16 @@ enum FlowKey {
 }
 
 impl FlowKey {
+    fn root_name(&self) -> PointLink {
+        let mut key = self;
+        loop {
+            match key {
+                Self::Name(link) => return *link,
+                Self::Member(base, _) | Self::Index { base_key: base, .. } => key = base,
+            }
+        }
+    }
+
     fn is_child_of(&self, db: &Database, search_key: &FlowKey) -> bool {
         let Some(base_key) = self.base_key() else {
             return false;
@@ -436,7 +446,7 @@ struct Frame {
 struct NameEntryIndex {
     indexed_len: usize,
     first_positions: HashMap<PointLink, usize>,
-    non_name_positions: Vec<usize>,
+    complex_positions: HashMap<PointLink, Vec<usize>>,
 }
 
 impl Frame {
@@ -451,7 +461,11 @@ impl Frame {
             if let FlowKey::Name(link) = entry.key {
                 index.first_positions.entry(link).or_insert(position);
             } else {
-                index.non_name_positions.push(position);
+                index
+                    .complex_positions
+                    .entry(entry.key.root_name())
+                    .or_default()
+                    .push(position);
             }
         }
         index.indexed_len = self.entries.len();
@@ -883,11 +897,7 @@ impl FlowAnalysis {
             let link = *link;
             tos_frame.ensure_name_index();
             let index = tos_frame.initial_name_index.as_ref().unwrap();
-            if index.non_name_positions.iter().all(|&position| {
-                !tos_frame.entries[position]
-                    .key
-                    .is_child_of(i_s.db, &new_entry.key)
-            }) {
+            if !index.complex_positions.contains_key(&link) {
                 let existing = index.first_positions.get(&link).copied();
                 if let Some(position) = existing {
                     let entry = &mut tos_frame.entries[position];
@@ -907,8 +917,56 @@ impl FlowAnalysis {
                 return;
             }
         }
-        tos_frame.initial_name_index = None;
+        if !matches!(new_entry.key, FlowKey::Name(_)) && tos_frame.entries.len() >= 64 {
+            let root = new_entry.key.root_name();
+            tos_frame.ensure_name_index();
+            let candidates = tos_frame
+                .initial_name_index
+                .as_ref()
+                .unwrap()
+                .complex_positions
+                .get(&root);
+            if candidates.is_none_or(|positions| {
+                positions.iter().all(|&position| {
+                    !tos_frame.entries[position]
+                        .key
+                        .is_child_of(i_s.db, &new_entry.key)
+                })
+            }) {
+                let existing = candidates.and_then(|positions| {
+                    positions.iter().copied().find(|&position| {
+                        tos_frame.entries[position]
+                            .key
+                            .equals(i_s.db, &new_entry.key)
+                    })
+                });
+                if let Some(position) = existing {
+                    let entry = &mut tos_frame.entries[position];
+                    if self.accumulating_types.get() > 0 {
+                        entry.type_ = entry.simplified_union(i_s, &new_entry);
+                        entry.widens |= new_entry.widens;
+                    } else {
+                        *entry = new_entry;
+                    }
+                } else {
+                    let position = tos_frame.entries.len();
+                    tos_frame.entries.push(new_entry);
+                    let index = tos_frame.initial_name_index.as_mut().unwrap();
+                    index
+                        .complex_positions
+                        .entry(root)
+                        .or_default()
+                        .push(position);
+                    index.indexed_len += 1;
+                }
+                return;
+            }
+        }
+        let previous_len = tos_frame.entries.len();
         invalidate_child_entries(&mut tos_frame.entries, i_s.db, &new_entry.key);
+        if tos_frame.entries.len() != previous_len {
+            tos_frame.initial_name_index = None;
+        }
         let entries = &mut tos_frame.entries;
         for entry in &mut *entries {
             if entry.key.equals(i_s.db, &new_entry.key) {
@@ -1014,10 +1072,12 @@ impl FlowAnalysis {
             recoverable_error!("Trying to overwrite entries, but there are no frames");
             return;
         };
-        tos_frame.initial_name_index = None;
-
         for entry in &new_entries {
+            let previous_len = tos_frame.entries.len();
             invalidate_child_entries(&mut tos_frame.entries, db, &entry.key);
+            if tos_frame.entries.len() != previous_len {
+                tos_frame.initial_name_index = None;
+            }
         }
 
         let entries = &mut tos_frame.entries;

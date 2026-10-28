@@ -971,7 +971,9 @@ mod lsp_edit_tests {
             count in 120usize..151,
             string_else in any::<bool>(),
             missing_last_else in any::<bool>(),
-            member_in_branches in any::<bool>(),
+            member_count in 0usize..4,
+            two_attrs in any::<bool>(),
+            reassign_first in any::<bool>(),
         ) {
             let mut options = ProjectOptions::default();
             options.settings.typeshed_path = Some(test_utils::typeshed_path());
@@ -981,16 +983,28 @@ mod lsp_edit_tests {
             let path = PathWithScheme::with_file_scheme(
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-conditional-edit.py")),
             );
-            let mut code = if member_in_branches {
-                String::from("class Box:\n    value: int = 0\nbox = Box()\nguard = bool(1)\nif guard:\n    box.value = 1\n")
-            } else {
-                String::from("guard = bool(1)\nif guard:\n")
-            };
+            let mut code = String::new();
+            if member_count > 0 {
+                code.push_str("class Box:\n    value: int = 0\n    other: int = 0\n");
+                for index in 0..member_count {
+                    code.push_str(&format!("box_{index} = Box()\n"));
+                }
+            }
+            code.push_str("guard = bool(1)\nif guard:\n");
+            for index in 0..member_count {
+                code.push_str(&format!("    box_{index}.value = 1\n"));
+                if two_attrs { code.push_str(&format!("    box_{index}.other = 3\n")); }
+            }
+            if reassign_first && member_count > 0 { code.push_str("    box_0 = Box()\n"); }
             for index in 0..count {
                 code.push_str(&format!("    name_{index} = {index}\n"));
             }
             code.push_str("else:\n");
-            if member_in_branches { code.push_str("    box.value = 2\n"); }
+            for index in 0..member_count {
+                code.push_str(&format!("    box_{index}.value = 2\n"));
+                if two_attrs { code.push_str(&format!("    box_{index}.other = 4\n")); }
+            }
+            if reassign_first && member_count > 0 { code.push_str("    box_0 = Box()\n"); }
             for index in 0..count {
                 if missing_last_else && index == count - 1 { continue; }
                 if string_else {
@@ -1002,8 +1016,9 @@ mod lsp_edit_tests {
             let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
             let current = format!("name_{}", count - 1);
             let previous = format!("name_{}", count - 2);
-            code.push_str(&format!("{current} + 1\n"));
-            let updated = code.replace(&format!("\n{current} + 1\n"), &format!("\n{previous} + 1\n"));
+            let suffix = if member_count > 0 { " + box_0.value + 1\n" } else { " + 1\n" };
+            code.push_str(&format!("{current}{suffix}"));
+            let updated = code.replace(&format!("\n{current}{suffix}"), &format!("\n{previous}{suffix}"));
             project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
             let _ = project.document(&path).unwrap().diagnostics();
             project.store_file_with_lsp_changes(

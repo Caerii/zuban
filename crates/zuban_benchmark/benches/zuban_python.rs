@@ -427,6 +427,56 @@ fn bench_conditional_definitions_edit(c: &mut Criterion, count: usize, mixed: bo
     );
 }
 
+fn bench_many_member_conditional_edit(c: &mut Criterion) {
+    let count = 400;
+    let (mut project, paths) = prepare_independent_files(1);
+    let path = paths[0].clone();
+    let mut code = String::from("class Box:\n    value: int = 0\n");
+    for index in 0..count {
+        code.push_str(&format!("box_{index} = Box()\n"));
+    }
+    code.push_str("guard = bool(1)\nif guard:\n");
+    for index in 0..count {
+        code.push_str(&format!(
+            "    box_{index}.value = {index}\n    name_{index} = {index}\n"
+        ));
+    }
+    code.push_str("else:\n");
+    for index in 0..count {
+        code.push_str(&format!(
+            "    box_{index}.value = {index}\n    name_{index} = {index}\n"
+        ));
+    }
+    let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
+    code.push_str("name_399 + 1\n");
+    project.store_in_memory_file(path.clone(), code.into_boxed_str());
+    let mut use_previous = false;
+    c.bench_function("reference edit in 400-name 400-member conditional", |b| {
+        b.iter(|| {
+            let replacement = if use_previous { "name_399" } else { "name_398" };
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(Position::new(line, 0), Position::new(line, 8))),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            use_previous = !use_previous;
+            let mut document = project.document(&path).unwrap();
+            let diagnostics = document.diagnostics();
+            assert!(diagnostics.is_empty());
+            std::hint::black_box(diagnostics);
+        })
+    });
+}
+
 fn bench_length_changing_lsp_edit(c: &mut Criterion, name: &str, code: String) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
@@ -809,6 +859,7 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_conditional_definitions_edit(c, 2_000, false);
     bench_conditional_definitions_edit(c, 4_000, false);
     bench_conditional_definitions_edit(c, 2_000, true);
+    bench_many_member_conditional_edit(c);
     bench_large_reference_lsp_edit(c, false, false);
     bench_length_changing_lsp_edit(
         c,
