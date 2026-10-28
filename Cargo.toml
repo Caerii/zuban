@@ -39,6 +39,7 @@ lsp-types = { git = "https://github.com/astral-sh/lsp-types.git", rev = "e15db05
     "proposed",
 ] }
 lsp-server.version = "0.7.9"
+memchr = "2"
 notify = "*"
 num-bigint = "*"
 num-traits = "*"

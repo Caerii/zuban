@@ -2497,6 +2497,7 @@ dependencies = [
  "lazy_static",
  "logging_config",
  "lsp-types",
+ "memchr",
  "num-bigint",
  "num-traits",
  "parsa_python_cst",

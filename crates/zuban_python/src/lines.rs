@@ -10,6 +10,45 @@ lazy_static::lazy_static! {
     static ref NEWLINES: Regex = Regex::new(r"\n|\r\n|\r").unwrap();
 }
 
+fn collect_newlines_scalar(bytes: &[u8]) -> Vec<CodeIndex> {
+    let mut lines = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                index += 1;
+                if bytes.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+                lines.push(index as CodeIndex);
+            }
+            b'\n' => {
+                index += 1;
+                lines.push(index as CodeIndex);
+            }
+            _ => index += 1,
+        }
+    }
+    lines
+}
+
+fn collect_newlines_sparse(bytes: &[u8]) -> Vec<CodeIndex> {
+    let mut lines = Vec::new();
+    for index in memchr::memchr2_iter(b'\r', b'\n', bytes) {
+        if bytes[index] == b'\r' {
+            let next = if bytes.get(index + 1) == Some(&b'\n') {
+                index + 2
+            } else {
+                index + 1
+            };
+            lines.push(next as CodeIndex);
+        } else if index == 0 || bytes[index - 1] != b'\r' {
+            lines.push((index + 1) as CodeIndex);
+        }
+    }
+    lines
+}
+
 pub fn split_lines(code: &str) -> impl Iterator<Item = &str> {
     NEWLINES.split(code)
 }
@@ -43,26 +82,33 @@ impl NewlineIndices {
 
     fn lines(&self, code: &str) -> &[CodeIndex] {
         self.0.get_or_init(|| {
-            let mut v = vec![];
             let bytes = code.as_bytes();
-            let mut index = 0;
-            while index < bytes.len() {
-                match bytes[index] {
-                    b'\r' => {
-                        index += 1;
-                        if bytes.get(index) == Some(&b'\n') {
-                            index += 1;
-                        }
-                        v.push(index as CodeIndex);
-                    }
-                    b'\n' => {
-                        index += 1;
-                        v.push(index as CodeIndex);
-                    }
-                    _ => index += 1,
-                }
-            }
-            Arc::from(v)
+            // Frequent line breaks are cheaper to scan sequentially. For long
+            // lines, skip directly from one break to the next.
+            let dense = if bytes.len() < 1024 {
+                true
+            } else {
+                let sample_len = 256;
+                let starts = [
+                    0,
+                    bytes.len() / 2 - sample_len / 2,
+                    bytes.len() - sample_len,
+                ];
+                starts
+                    .into_iter()
+                    .map(|start| {
+                        memchr::memchr2_iter(b'\r', b'\n', &bytes[start..start + sample_len])
+                            .count()
+                    })
+                    .sum::<usize>()
+                    >= 72
+            };
+            let lines = if dense {
+                collect_newlines_scalar(bytes)
+            } else {
+                collect_newlines_sparse(bytes)
+            };
+            Arc::from(lines)
         })
     }
 
@@ -324,6 +370,25 @@ impl<'code> PositionInfos<'code> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_and_dense_newline_scans_agree() {
+        for (name, code) in [
+            ("sparse", format!("x = 1\n#{}\n", "a".repeat(100_000))),
+            ("dense", "x = 1\n".repeat(16_000)),
+            ("typical", "x = 1                         \n".repeat(3_200)),
+            (
+                "mixed endings",
+                format!("a\r\nb\rc\n{}\r\nd", "x".repeat(100_000)),
+            ),
+        ] {
+            assert_eq!(
+                NewlineIndices::new().lines(&code),
+                collect_newlines_scalar(code.as_bytes()),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn test_shifted_line_indices_match_fresh_scan() {
