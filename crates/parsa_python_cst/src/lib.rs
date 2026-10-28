@@ -972,6 +972,15 @@ impl<'db> Name<'db> {
         self.node.as_code()
     }
 
+    pub fn is_standalone_module_expression(&self) -> bool {
+        if !self.is_reference() || !matches!(scope_for_node(self.node), Scope::Module) {
+            return false;
+        }
+        self.node
+            .parent_until(&[Nonterminal(simple_stmt)])
+            .is_some_and(|simple_statement_node| simple_statement_node.as_code() == self.as_str())
+    }
+
     pub fn is_reference(&self) -> bool {
         !self.node.parent().unwrap().is_type(Nonterminal(name_def))
     }
@@ -5758,5 +5767,27 @@ mod directive_tests {
             ignored.type_ignore_comment_for(0, 5),
             Some(TypeIgnoreComment::WithoutCode)
         ));
+    }
+}
+
+#[cfg(test)]
+mod standalone_name_tests {
+    use super::*;
+
+    #[test]
+    fn only_single_name_module_statements_are_reusable_references() {
+        for (code, position, expected) in [
+            ("name\n", 0, true),
+            ("name # comment\n", 0, true),
+            ("other = name\n", 8, false),
+            ("name + 1\n", 0, false),
+            ("def f():\n    name\n", 13, false),
+        ] {
+            let tree = Tree::parse(code.into());
+            let (_, GotoNode::Name(name)) = tree.goto_node(position) else {
+                panic!("expected a name at {position} in {code:?}");
+            };
+            assert_eq!(name.is_standalone_module_expression(), expected, "{code:?}");
+        }
     }
 }

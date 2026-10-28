@@ -172,6 +172,7 @@ impl Project {
                             start,
                             end,
                             source_address: code.as_ptr() as usize,
+                            reference_binding: file.reference_binding_candidate(start, end),
                         })
                 });
                 let updated_line_indices = match applied.line_index_update {
@@ -843,6 +844,80 @@ mod lsp_edit_tests {
                 current = file.points.get(current).node_index();
                 assert_eq!(current == first, definition + 1 == count);
             }
+        }
+    }
+
+    #[test]
+    fn standalone_reference_edits_reuse_binding_and_fall_back_for_unknown_names() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/reference-binding.py")),
+        );
+        let mut code = String::from("alpha = 1\ndelta = 2\n");
+        for index in 0..1_000 {
+            code.push_str(&format!("name_{index} = {index}\n"));
+        }
+        code.push_str("alpha\n");
+        let start = code.len() - "alpha\n".len();
+        project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let original_table = project.db.loaded_python_file(index).symbol_table.clone();
+        assert!(
+            project
+                .db
+                .loaded_python_file(index)
+                .reference_binding_candidate(start, start + 5)
+                .is_some()
+        );
+
+        for (replacement, should_reuse) in [("delta", true), ("alpha", true), ("omega", false)] {
+            let previous_table = project.db.loaded_python_file(index).symbol_table.clone();
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(Position::new(1_002, 0), Position::new(1_002, 5))),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            let file = project.db.loaded_python_file(index);
+            assert_eq!(
+                Arc::ptr_eq(&previous_table, &file.symbol_table),
+                should_reuse
+            );
+            if should_reuse {
+                assert!(Arc::ptr_eq(&original_table, &file.symbol_table));
+            }
+
+            let mut expected_code = code.clone();
+            expected_code.replace_range(start..start + 5, replacement);
+            let mut fresh = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            fresh.store_in_memory_file(path.clone(), expected_code.into_boxed_str());
+            let fresh_index = fresh.db.vfs.in_memory_file(&path).unwrap();
+            let fresh_file = fresh.db.loaded_python_file(fresh_index);
+            let (_, GotoNode::Name(name)) = file.tree.goto_node(start as u32) else {
+                panic!("expected reference name");
+            };
+            if should_reuse {
+                assert_eq!(
+                    file.points.get(name.index()).node_index(),
+                    fresh_file.points.get(name.index()).node_index()
+                );
+            }
+            assert_eq!(
+                project.document(&path).unwrap().diagnostics().len(),
+                fresh.document(&path).unwrap().diagnostics().len()
+            );
         }
     }
 

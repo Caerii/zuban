@@ -89,6 +89,7 @@ pub(crate) struct NameBinder<'db> {
     unsaved_classes: Vec<UnsavedClass<'db>>,
     annotation_names: Vec<AnnotationName<'db>>,
     following_nodes_need_flow_analysis: bool,
+    has_standalone_module_reference: bool,
     latest_return_or_yield: NodeIndex,
     parent: Option<*mut NameBinder<'db>>,
 }
@@ -112,6 +113,7 @@ impl<'db> NameBinder<'db> {
             unsaved_classes: vec![],
             annotation_names: vec![],
             following_nodes_need_flow_analysis: false,
+            has_standalone_module_reference: false,
             latest_return_or_yield: 0,
             parent,
         }
@@ -120,7 +122,7 @@ impl<'db> NameBinder<'db> {
     pub(crate) fn with_global_binder(
         db_infos: DbInfos<'db>,
         func: impl FnOnce(&mut NameBinder<'db>),
-    ) -> SymbolTable {
+    ) -> (SymbolTable, bool) {
         let mut binder = Self::new(db_infos, NameBinderKind::Global, 0, None);
         func(&mut binder);
         binder.close();
@@ -159,7 +161,7 @@ impl<'db> NameBinder<'db> {
             |_| (),
         );
 
-        binder.symbol_table
+        (binder.symbol_table, binder.has_standalone_module_reference)
     }
 
     fn with_nested(
@@ -481,7 +483,19 @@ impl<'db> NameBinder<'db> {
                     self.following_nodes_need_flow_analysis = true;
                     self.index_non_block_node(&del_stmt, ordered)
                 }
-                StmtLikeContent::StarExpressions(s) => self.index_non_block_node(&s, ordered),
+                StmtLikeContent::StarExpressions(s) => {
+                    if matches!(self.kind, NameBinderKind::Global)
+                        && !self.has_standalone_module_reference
+                        && s.maybe_simple_expression()
+                            .and_then(|expr| expr.maybe_unpacked_atom())
+                            .is_some_and(|atom| {
+                                matches!(atom, AtomContent::Name(name) if name.is_standalone_module_expression())
+                            })
+                    {
+                        self.has_standalone_module_reference = true;
+                    }
+                    self.index_non_block_node(&s, ordered)
+                }
                 StmtLikeContent::YieldExpr(y) => self.index_non_block_node(&y, ordered),
                 StmtLikeContent::GlobalStmt(g) => self.index_non_block_node(&g, ordered),
                 StmtLikeContent::NonlocalStmt(n) => self.index_non_block_node(&n, ordered),

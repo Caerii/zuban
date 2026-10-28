@@ -19,7 +19,7 @@ use vfs::{
 use crate::{
     ProjectOptions,
     auto_imports::TypeshedSymbols,
-    file::{File, SuperFile},
+    file::{File, ReferenceBindingCandidate, SuperFile},
     lines::split_lines,
     prelude::*,
     python_state::PythonState,
@@ -409,6 +409,10 @@ unsafe impl Sync for Points {}
 impl Points {
     pub fn new(length: usize) -> Self {
         Self(vec![Default::default(); length])
+    }
+
+    pub fn from_binding_snapshot(snapshot: &[Point]) -> Self {
+        Self(snapshot.iter().copied().map(Cell::new).collect())
     }
 
     #[inline]
@@ -1070,6 +1074,7 @@ pub(crate) struct SyntaxReuseCandidate {
     pub start: usize,
     pub end: usize,
     pub source_address: usize,
+    pub reference_binding: Option<ReferenceBindingCandidate>,
 }
 
 pub(crate) struct Database {
@@ -1536,7 +1541,20 @@ impl Database {
                         )
                     };
                     match rebound {
-                        Ok(tree) => PythonFile::new(&self.project, file_index, file_entry, tree),
+                        Ok(tree) => {
+                            if let Some(binding) = candidate.reference_binding {
+                                match PythonFile::from_reference_binding_candidate(
+                                    file_index, file_entry, tree, binding,
+                                ) {
+                                    Ok(file) => file,
+                                    Err(tree) => {
+                                        PythonFile::new(&self.project, file_index, file_entry, tree)
+                                    }
+                                }
+                            } else {
+                                PythonFile::new(&self.project, file_index, file_entry, tree)
+                            }
+                        }
                         Err(code) => PythonFile::from_file_entry_and_code(
                             &self.project,
                             file_index,
@@ -1557,6 +1575,7 @@ impl Database {
                     offset: None,
                     ignore_diagnostics: false,
                 });
+                file.capture_binding_snapshot();
                 file
             },
         );

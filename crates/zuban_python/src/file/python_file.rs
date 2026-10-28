@@ -104,6 +104,8 @@ pub(crate) struct PythonFile {
     pub tree: Tree, // TODO should probably not be public
     // Finished during binding; clones can share the names and their backing source text.
     pub symbol_table: Arc<SymbolTable>,
+    binding_snapshot: Option<Arc<BindingSnapshot>>,
+    has_standalone_module_reference: bool,
     maybe_dunder_all: OnceLock<Option<DunderAllState>>, // For __all__
     pub points: Points,
     pub complex_points: ComplexValues,
@@ -119,6 +121,66 @@ pub(crate) struct PythonFile {
     pub(super) delayed_diagnostics: RwLock<VecDeque<DelayedDiagnostic>>,
 
     pub newline_indices: NewlineIndices,
+}
+
+pub(crate) struct ReferenceBindingCandidate {
+    file_index: FileIndex,
+    snapshot: Arc<BindingSnapshot>,
+    symbol_table: Arc<SymbolTable>,
+    name_index: NodeIndex,
+    point: Point,
+    start: usize,
+    end: usize,
+    flags: Option<FinalizedTypeCheckerFlags>,
+    ignore_type_errors: Option<IgnoreFileReason>,
+}
+
+struct BindingSnapshot {
+    base: Arc<[Point]>,
+    changes: Vec<(NodeIndex, Point)>,
+}
+
+impl BindingSnapshot {
+    fn point(&self, index: NodeIndex) -> Option<Point> {
+        self.changes
+            .iter()
+            .rev()
+            .find_map(|&(changed, point)| (changed == index).then_some(point))
+            .or_else(|| self.base.get(index as usize).copied())
+    }
+
+    fn with_changed_point(&self, index: NodeIndex, point: Point) -> Self {
+        if self.changes.len() >= 64 {
+            let mut base = self.base.to_vec();
+            for &(changed, value) in &self.changes {
+                base[changed as usize] = value;
+            }
+            base[index as usize] = point;
+            return Self {
+                base: base.into(),
+                changes: Vec::new(),
+            };
+        }
+        let mut changes = self.changes.clone();
+        if let Some((_, existing)) = changes.iter_mut().find(|(changed, _)| *changed == index) {
+            *existing = point;
+        } else {
+            changes.push((index, point));
+        }
+        Self {
+            base: self.base.clone(),
+            changes,
+        }
+    }
+}
+
+fn single_definition(snapshot: &BindingSnapshot, definition: NodeIndex) -> bool {
+    snapshot.point(definition).is_some_and(|point| {
+        point.calculated()
+            && point.kind() == PointKind::Specific
+            && point.specific() == Specific::FirstNameOfNameDef
+            && point.node_index() == definition
+    })
 }
 
 #[derive(Default)]
@@ -159,6 +221,8 @@ impl Clone for PythonFile {
         Self {
             tree: self.tree.clone(),
             symbol_table: self.symbol_table.clone(),
+            binding_snapshot: self.binding_snapshot.clone(),
+            has_standalone_module_reference: self.has_standalone_module_reference,
             maybe_dunder_all: self.maybe_dunder_all.clone(),
             points: self.points.clone(),
             complex_points: self.complex_points.clone(),
@@ -288,6 +352,131 @@ impl fmt::Debug for PythonFile {
 }
 
 impl<'db> PythonFile {
+    pub fn capture_binding_snapshot(&mut self) {
+        if self.binding_snapshot.is_some()
+            || !self.has_standalone_module_reference
+            || self.tree.length() < 4_096
+            || self.super_file.is_some()
+            || !self.complex_points.0.is_empty()
+            || !self.all_imports.is_empty()
+            || !self.star_imports.is_empty()
+            || unsafe { self.issues.iter().next().is_some() }
+        {
+            return;
+        }
+        self.binding_snapshot = Some(Arc::new(BindingSnapshot {
+            base: self.points.iter().collect::<Vec<_>>().into(),
+            changes: Vec::new(),
+        }));
+    }
+
+    pub fn reference_binding_candidate(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<ReferenceBindingCandidate> {
+        let snapshot = self.binding_snapshot.as_ref()?;
+        if self.super_file.is_some()
+            || !self.sub_files.separate_files.is_empty()
+            || !self.sub_files.in_same_file.read().unwrap().is_empty()
+        {
+            return None;
+        }
+        let (_, GotoNode::Name(name)) = self.tree.goto_node(start.try_into().ok()?) else {
+            return None;
+        };
+        if name.start() as usize != start
+            || name.end() as usize != end
+            || !name.is_standalone_module_expression()
+        {
+            return None;
+        }
+        let point = snapshot.point(name.index())?;
+        if !point.calculated()
+            || point.kind() != PointKind::Redirect
+            || point.file_index() != self.file_index
+            || point.needs_flow_analysis()
+            || !point.in_global_scope()
+        {
+            return None;
+        }
+        let definition = point.node_index();
+        if self.tree.node_start_position(definition) as usize >= start
+            || !single_definition(snapshot, definition)
+        {
+            return None;
+        }
+        Some(ReferenceBindingCandidate {
+            file_index: self.file_index,
+            snapshot: snapshot.clone(),
+            symbol_table: self.symbol_table.clone(),
+            name_index: name.index(),
+            point,
+            start,
+            end,
+            flags: self.flags.clone(),
+            ignore_type_errors: self.ignore_type_errors,
+        })
+    }
+
+    pub fn from_reference_binding_candidate(
+        file_index: FileIndex,
+        file_entry: &FileEntry,
+        tree: Tree,
+        candidate: ReferenceBindingCandidate,
+    ) -> Result<Self, Tree> {
+        let (_, GotoNode::Name(name)) = tree.goto_node(candidate.start as CodeIndex) else {
+            return Err(tree);
+        };
+        if file_index != candidate.file_index
+            || name.index() != candidate.name_index
+            || name.start() as usize != candidate.start
+            || name.end() as usize != candidate.end
+            || !name.is_standalone_module_expression()
+        {
+            return Err(tree);
+        }
+        let Some(definition) = candidate.symbol_table.lookup_symbol(name.as_str()) else {
+            return Err(tree);
+        };
+        if tree.node_start_position(definition) as usize >= candidate.start
+            || !single_definition(&candidate.snapshot, definition)
+        {
+            return Err(tree);
+        }
+        let changed_point = candidate.point.with_changed_node_index(definition);
+        let points = Points::from_binding_snapshot(&candidate.snapshot.base);
+        for &(index, point) in &candidate.snapshot.changes {
+            points.set(index, point);
+        }
+        points.set(candidate.name_index, changed_point);
+        let snapshot = Arc::new(
+            candidate
+                .snapshot
+                .with_changed_point(candidate.name_index, changed_point),
+        );
+        Ok(Self {
+            tree,
+            file_index,
+            symbol_table: candidate.symbol_table,
+            binding_snapshot: Some(snapshot),
+            has_standalone_module_reference: true,
+            maybe_dunder_all: OnceLock::default(),
+            points,
+            complex_points: Default::default(),
+            star_imports: Default::default(),
+            all_imports: Default::default(),
+            issues: Default::default(),
+            newline_indices: NewlineIndices::new(),
+            sub_files: Default::default(),
+            super_file: None,
+            stub_cache: file_entry.name.ends_with(".pyi").then(StubCache::default),
+            ignore_type_errors: candidate.ignore_type_errors,
+            flags: candidate.flags,
+            delayed_diagnostics: Default::default(),
+        })
+    }
+
     pub fn from_file_entry_and_code(
         project: &PythonProject,
         file_index: FileIndex,
@@ -366,7 +555,7 @@ impl<'db> PythonFile {
         let complex_points = Default::default();
         let star_imports: RefCell<Vec<StarImport>> = Default::default();
         let all_imports: RefCell<Vec<FileImport>> = Default::default();
-        let symbol_table = NameBinder::with_global_binder(
+        let (symbol_table, has_standalone_module_reference) = NameBinder::with_global_binder(
             DbInfos {
                 // TODO this does not use flags of the super file. Is this an issue?
                 settings: &project.settings,
@@ -386,6 +575,8 @@ impl<'db> PythonFile {
             tree,
             file_index,
             symbol_table: Arc::new(symbol_table),
+            binding_snapshot: None,
+            has_standalone_module_reference,
             maybe_dunder_all: OnceLock::default(),
             points,
             complex_points,

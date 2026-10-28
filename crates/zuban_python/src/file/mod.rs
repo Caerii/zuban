@@ -27,7 +27,8 @@ pub(crate) use name_resolution::{
     is_reexport_issue,
 };
 pub(crate) use python_file::{
-    ComplexValues, FileImport, OtherDefinitionIterator, PythonFile, SuperFile, dotted_path_from_dir,
+    ComplexValues, FileImport, OtherDefinitionIterator, PythonFile, ReferenceBindingCandidate,
+    SuperFile, dotted_path_from_dir,
 };
 pub(crate) use type_computation::{
     ANNOTATION_TO_EXPR_DIFFERENCE, CLASS_TO_CLASS_INFO_DIFFERENCE, ClassInitializer, ClassNodeRef,

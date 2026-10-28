@@ -259,6 +259,47 @@ fn bench_same_length_lsp_edit(c: &mut Criterion, name: &str, code: String) {
     });
 }
 
+fn bench_large_reference_lsp_edit(c: &mut Criterion, standalone: bool) {
+    let (mut project, paths) = prepare_independent_files(1);
+    let path = paths[0].clone();
+    let mut code = String::from("alpha = 1\ndelta = 2\n");
+    for index in 0..16_000 {
+        code.push_str(&format!("name_{index} = {index}\n"));
+    }
+    code.push_str(if standalone { "alpha\n" } else { "alpha + 0\n" });
+    project.store_in_memory_file(path.clone(), code.into_boxed_str());
+    let name = if standalone {
+        "standalone reference edit in 16k-unique-name file"
+    } else {
+        "compound reference edit in 16k-unique-name file"
+    };
+    let mut use_delta = false;
+    c.bench_function(name, |b| {
+        b.iter(|| {
+            let replacement = if use_delta { "alpha" } else { "delta" };
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(16_002, 0),
+                            Position::new(16_002, 5),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            use_delta = !use_delta;
+            std::hint::black_box(project.code_of_in_memory_file(&path));
+        })
+    });
+}
+
 fn bench_length_changing_lsp_edit(c: &mut Criterion, name: &str, code: String) {
     let (mut project, paths) = prepare_independent_files(1);
     let path = paths[0].clone();
@@ -633,6 +674,8 @@ fn bench_type_checking(c: &mut Criterion) {
             .map(|index| format!("name_{index} = 1\n"))
             .collect(),
     );
+    bench_large_reference_lsp_edit(c, true);
+    bench_large_reference_lsp_edit(c, false);
     bench_length_changing_lsp_edit(
         c,
         "length-changing LSP edit in 100 KiB file",
