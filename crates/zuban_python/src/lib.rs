@@ -1428,6 +1428,105 @@ mod lsp_edit_tests {
                 );
             }
         }
+
+        #[test]
+        fn repeated_conditional_edits_match_fresh_analysis(
+            branch_count in 65usize..90,
+            string_else in any::<bool>(),
+            omit_last_else in any::<bool>(),
+            edits in prop::collection::vec((0usize..3, 0usize..4), 2..5),
+        ) {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-repeated-conditional-edits.py")),
+            );
+            let mut code = String::from(
+                "class Box:\n    value: int = 0\nbox = Box()\nguard = bool(1)\nif guard:\n    box.value = 1\n",
+            );
+            for index in 0..branch_count {
+                code.push_str(&format!("    name_{index} = {index}\n"));
+            }
+            code.push_str("else:\n    box.value = 2\n");
+            for index in 0..branch_count {
+                if omit_last_else && index == branch_count - 1 {
+                    continue;
+                }
+                if string_else {
+                    code.push_str(&format!("    name_{index} = 'x'\n"));
+                } else {
+                    code.push_str(&format!("    name_{index} = {index}\n"));
+                }
+            }
+            let first_reference_line = code.bytes().filter(|&byte| byte == b'\n').count();
+            let initial = format!("name_{}", branch_count - 1);
+            let mut references = [initial.as_str(); 3];
+            for _ in 0..references.len() {
+                code.push_str(&format!("{initial} + box.value\n"));
+            }
+            project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+            let _ = project.document(&path).unwrap().diagnostics();
+            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+
+            for (step, (slot, replacement_kind)) in edits.into_iter().enumerate() {
+                let previous = references[slot];
+                let replacement = match replacement_kind {
+                    0 => initial.as_str(),
+                    1 => "name_0",
+                    2 => "missing_name",
+                    _ => "box",
+                };
+                let line = first_reference_line + slot;
+                let start = code.lines().take(line).map(|line| line.len() + 1).sum::<usize>();
+                code.replace_range(start..start + previous.len(), replacement);
+                references[slot] = replacement;
+                project.store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(line as u32, 0),
+                            Position::new(line as u32, previous.len() as u32),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                ).unwrap();
+
+                // A distinct oracle file prevents reuse of its previous analysis state.
+                let fresh_path = PathWithScheme::with_file_scheme(
+                    fresh.vfs_handler().normalize_rc_path(fresh.vfs_handler().unchecked_abs_path(
+                        &format!("/property-repeated-conditional-edits-{step}.py"),
+                    )),
+                );
+                fresh.store_in_memory_file(fresh_path.clone(), code.clone().into_boxed_str());
+                prop_assert_eq!(project.code_of_in_memory_file(&path).unwrap(), code.as_str());
+                let mut actual_document = project.document(&path).unwrap();
+                let mut expected_document = fresh.document(&fresh_path).unwrap();
+                let actual = actual_document.diagnostics();
+                let expected = expected_document.diagnostics();
+                let signature = |diagnostic: &diagnostics::Diagnostic<'_>| {
+                    let start = diagnostic.start_position();
+                    let end = diagnostic.end_position();
+                    (
+                        (start.line_zero_based(), start.utf8_bytes_column()),
+                        (end.line_zero_based(), end.utf8_bytes_column()),
+                        diagnostic.mypy_error_code(),
+                        diagnostic.message(),
+                    )
+                };
+                prop_assert_eq!(
+                    actual.iter().map(signature).collect::<Vec<_>>(),
+                    expected.iter().map(signature).collect::<Vec<_>>(),
+                );
+            }
+        }
     }
 
     #[test]
