@@ -2489,6 +2489,10 @@ impl Diagnostics {
     pub fn set_complete_diagnostics(&self) {
         self.diagnostics_are_complete.store(true, Ordering::SeqCst);
     }
+
+    pub fn is_complete(&self) -> bool {
+        self.diagnostics_are_complete.load(Ordering::Acquire)
+    }
 }
 
 impl Clone for Diagnostics {

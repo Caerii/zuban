@@ -865,10 +865,15 @@ impl<'db> PythonFile {
     }
 
     pub fn has_calculated_diagnostics(&self) -> bool {
-        self.points.get(0).calculated() && self.delayed_diagnostics.read().unwrap().is_empty()
+        self.points.get(0).calculated()
+            && self.issues.is_complete()
+            && self.delayed_diagnostics.read().unwrap().is_empty()
     }
 
     pub fn ensure_calculated_diagnostics(&self, db: &Database) -> Result<(), ()> {
+        if self.has_calculated_diagnostics() {
+            return Ok(());
+        }
         self.points.materialize_for_inference();
         self.inference(&InferenceState::new(db, self))
             .calculate_module_diagnostics()
@@ -1623,6 +1628,29 @@ fn add_error_if_typeshed_is_overwritten(file_entry: &FileEntry) -> Option<IssueK
 #[cfg(test)]
 mod stored_complex_point_tests {
     use super::*;
+
+    #[test]
+    fn module_symbol_analysis_does_not_complete_diagnostics() {
+        let mut options = crate::ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = crate::test_project::new(options);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/module-symbol-analysis.py")),
+        );
+        project.store_in_memory_file(path.clone(), "value: int = 1\n".into());
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let file = project.db.loaded_python_file(index);
+
+        file.ensure_module_symbols_flow_analysis(&project.db)
+            .unwrap();
+        assert!(!file.has_calculated_diagnostics());
+
+        file.ensure_calculated_diagnostics(&project.db).unwrap();
+        assert!(file.has_calculated_diagnostics());
+        file.ensure_calculated_diagnostics(&project.db).unwrap();
+    }
 
     #[test]
     fn tail_replay_shares_immutable_inference_and_keeps_appended_indices_stable() {
