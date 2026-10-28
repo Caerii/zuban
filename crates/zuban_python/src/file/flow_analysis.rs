@@ -934,24 +934,35 @@ impl Frame {
         }
         if self.entries.len() >= 64 {
             self.ensure_name_index();
-            let root = key.root_name();
-            return self
-                .initial_name_index
-                .borrow()
-                .as_ref()
-                .unwrap()
+            return self.lookup_entry_position_in_index(
+                db,
+                key,
+                self.initial_name_index.borrow().as_ref().unwrap(),
+            );
+        }
+        self.entries
+            .iter()
+            .position(|entry| entry.key.equals(db, key))
+    }
+
+    fn lookup_entry_position_in_index(
+        &self,
+        db: &Database,
+        key: &FlowKey,
+        index: &NameEntryIndex,
+    ) -> Option<usize> {
+        match key {
+            FlowKey::Name(link) => index.first_positions.get(link).copied(),
+            _ => index
                 .complex_positions
-                .get(&root)
+                .get(&key.root_name())
                 .and_then(|positions| {
                     positions
                         .iter()
                         .copied()
                         .find(|&position| self.entries[position].key.equals(db, key))
-                });
+                }),
         }
-        self.entries
-            .iter()
-            .position(|entry| entry.key.equals(db, key))
     }
 
     fn has_child_entry(&self, db: &Database, key: &FlowKey) -> bool {
@@ -1197,9 +1208,26 @@ impl FlowAnalysis {
         first_frame: &mut Frame,
         other_frame: &mut Frame,
     ) {
+        // A merge changes entry flags, but never its keys or positions. Build
+        // the other branch's lookup index once and keep it borrowed across the
+        // whole pass instead of refreshing it for every merged entry.
+        let other_index = if other_frame.entries.len() >= 64 {
+            other_frame.ensure_name_index();
+            Some(other_frame.initial_name_index.borrow())
+        } else {
+            None
+        };
         'outer: for first_entry in &first_frame.entries {
             if first_entry.modifies_ancestors {
-                let matched_index = other_frame.lookup_entry_position(i_s.db, &first_entry.key);
+                let matched_index = if let Some(index) = &other_index {
+                    other_frame.lookup_entry_position_in_index(
+                        i_s.db,
+                        &first_entry.key,
+                        index.as_ref().unwrap(),
+                    )
+                } else {
+                    other_frame.lookup_entry_position(i_s.db, &first_entry.key)
+                };
                 if let Some(index) = matched_index {
                     let other_entry = &mut other_frame.entries[index];
                     if other_entry.modifies_ancestors {
