@@ -749,6 +749,52 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn partial_name_edit_rebinds_symbols_and_diagnostics() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/partial-name-edit.py")),
+        );
+        project.store_in_memory_file(path.clone(), "name_0 = 1\nname_0\n".into());
+        assert!(project.document(&path).unwrap().diagnostics().is_empty());
+
+        for (replacement, expected_definition, diagnostic_count) in
+            [("y", "yame_0", 1), ("n", "name_0", 0)]
+        {
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(Position::new(0, 0), Position::new(0, 1))),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            let index = project.db.vfs.in_memory_file(&path).unwrap();
+            let file = project.db.loaded_python_file(index);
+            assert!(file.lookup_symbol(expected_definition).is_some());
+            let previous_definition = if replacement == "y" {
+                "name_0"
+            } else {
+                "yame_0"
+            };
+            assert!(file.lookup_symbol(previous_definition).is_none());
+            assert_eq!(
+                project.document(&path).unwrap().diagnostics().len(),
+                diagnostic_count
+            );
+        }
+    }
+
+    #[test]
     fn same_length_name_edit_preserves_inline_directive_semantics() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());

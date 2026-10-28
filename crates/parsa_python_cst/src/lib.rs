@@ -59,27 +59,44 @@ impl Tree {
         replacement: &str,
     ) -> bool {
         let old = self.code();
-        if start >= end
-            || end > old.len()
-            || replacement.len() != end - start
+        if start >= end || end > old.len() || replacement.len() != end - start {
+            return false;
+        }
+        let Ok(start_index) = start.try_into() else {
+            return false;
+        };
+        let leaf = self.0.leaf_by_position(start_index);
+        let token_start = leaf.start() as usize;
+        let token_end = leaf.end() as usize;
+        if !leaf.is_type(Terminal(TerminalType::Name))
+            || token_start > start
+            || token_end < end
             || old
                 .as_bytes()
-                .get(start.wrapping_sub(1))
+                .get(token_start.wrapping_sub(1))
                 .is_some_and(|byte| {
                     byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'\'' | b'"' | b'\\')
                 })
-            || (old.as_bytes().get(start.wrapping_sub(1)) == Some(&b'.')
+            || (old.as_bytes().get(token_start.wrapping_sub(1)) == Some(&b'.')
                 && old
                     .as_bytes()
-                    .get(start.wrapping_sub(2))
+                    .get(token_start.wrapping_sub(2))
                     .is_some_and(u8::is_ascii_digit))
-            || matches!(old.as_bytes().get(end), Some(b'\'' | b'"'))
+            || matches!(old.as_bytes().get(token_end), Some(b'\'' | b'"'))
         {
             return false;
         }
-        let Some(old_name) = old.get(start..end) else {
+        let (Some(old_name), Some(prefix), Some(suffix)) = (
+            old.get(token_start..token_end),
+            old.get(token_start..start),
+            old.get(end..token_end),
+        ) else {
             return false;
         };
+        let mut new_name = String::with_capacity(old_name.len());
+        new_name.push_str(prefix);
+        new_name.push_str(replacement);
+        new_name.push_str(suffix);
         let reusable_name = |name: &str| {
             let name_bytes = name.as_bytes();
             name_bytes
@@ -92,20 +109,11 @@ impl Tree {
                 && !keywords_contain(name)
                 && !matches!(name, "match" | "case" | "type" | "_" | "async" | "await")
         };
-        if !reusable_name(old_name) || !reusable_name(replacement) {
-            return false;
-        }
-        let Ok(start_index) = start.try_into() else {
-            return false;
-        };
-        let leaf = self.0.leaf_by_position(start_index);
-        leaf.start() as usize == start
-            && leaf.end() as usize == end
-            && leaf.is_type(Terminal(TerminalType::Name))
+        reusable_name(old_name) && reusable_name(&new_name)
     }
 
-    /// Reuse syntax nodes when one complete ASCII name token changes without
-    /// changing its byte width or any surrounding source text.
+    /// Reuse syntax nodes when part or all of one ASCII name token changes
+    /// without changing its byte width or any surrounding source text.
     pub fn with_same_length_name_edit(
         &self,
         start: usize,
@@ -125,12 +133,12 @@ impl Tree {
             return Err(code);
         }
         // SAFETY: the checks above prove the new source differs only in this
-        // complete, same-width name token.
+        // same-width name token.
         unsafe { self.with_verified_same_length_name_edit(start, end, code) }
     }
 
     /// Rebind a source buffer already constructed from this tree by replacing
-    /// exactly one complete, same-width name token.
+    /// part or all of one same-width name token.
     ///
     /// # Safety
     /// `code` must differ from `self.code()` only at `start..end`.
@@ -5562,6 +5570,10 @@ mod incremental_name_tests {
             ("class Foo:\n    pass\n", 6, 9, "Bar"),
             ("obj.foo = 1\n", 4, 7, "bar"),
             ("from pkg import foo\n", 16, 19, "bar"),
+            ("name_0 = 1\n", 0, 1, "y"),
+            ("name_0 = 1\n", 2, 3, "z"),
+            ("name_0 = 1\n", 5, 6, "1"),
+            ("obj.attribute = 1\n", 4, 5, "b"),
         ] {
             let tree = Tree::parse(old.into());
             let new = format!("{}{}{}", &old[..start], replacement, &old[end..]);
@@ -5597,6 +5609,10 @@ mod incremental_name_tests {
             ("x = 'foo'\n", 5, 8, "x = 'bar'\n"),
             ("é = 1\n", 0, 2, "xy = 1\n"),
             ("x = 1", 0, 1, "y = 1"),
+            ("xor = 1\n", 0, 1, "for = 1\n"),
+            ("xase = 1\n", 0, 1, "case = 1\n"),
+            ("name_0 = 1\n", 0, 1, "1ame_0 = 1\n"),
+            ("xr\"hi\"\n", 0, 1, "fr\"hi\"\n"),
         ] {
             let tree = Tree::parse(old.into());
             assert!(
@@ -5619,6 +5635,10 @@ mod incremental_name_tests {
             ("f'{foo}'\n", 3, 6),
             ("if foo:\n    pass\n", 3, 6),
             ("foo.bar\n", 0, 3),
+            ("name_0 = 1\n", 0, 1),
+            ("name_0 = 1\n", 2, 3),
+            ("name_0 = 1\n", 5, 6),
+            ("obj.attribute = 1\n", 4, 5),
         ];
         let replacements = [
             "a", "b", "f", "r", "x", "y", "_", "foo", "bar", "for", "def", "try", "xor", "f00",
