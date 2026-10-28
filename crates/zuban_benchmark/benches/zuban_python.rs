@@ -260,6 +260,36 @@ fn bench_same_length_large_lsp_edit(c: &mut Criterion) {
     });
 }
 
+fn bench_length_changing_large_lsp_edit(c: &mut Criterion) {
+    let (mut project, paths) = prepare_independent_files(1);
+    let path = paths[0].clone();
+    let code = format!("x = 1\n#{}\n", "a".repeat(100_000));
+    project.store_in_memory_file(path.clone(), code.into_boxed_str());
+    let mut expanded = false;
+    c.bench_function("length-changing LSP edit in 100 KiB file", |b| {
+        b.iter(|| {
+            let replacement = if expanded { "x" } else { "yy" };
+            let end = if expanded { 2 } else { 1 };
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(Position::new(0, 0), Position::new(0, end))),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            expanded = !expanded;
+            std::hint::black_box(project.code_of_in_memory_file(&path));
+        })
+    });
+}
+
 fn bench_warm_multi_lsp_edit(c: &mut Criterion, edit_count: u32) {
     let (mut project, paths) = prepare_independent_files(1000);
     let edited_path = paths[0].clone();
@@ -484,6 +514,7 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_warm_lsp_edit(c);
     bench_unchanged_lsp_edit(c);
     bench_same_length_large_lsp_edit(c);
+    bench_length_changing_large_lsp_edit(c);
     bench_warm_multi_lsp_edit(c, 32);
     bench_warm_multi_lsp_edit(c, 256);
     bench_large_reverse_lsp_edit(c);

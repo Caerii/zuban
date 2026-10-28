@@ -159,12 +159,23 @@ impl Project {
         )?;
         match applied.code {
             std::borrow::Cow::Owned(code) => {
-                let reused_line_indices = applied
-                    .reuse_line_indices
-                    .then(|| file.newline_indices.clone());
+                let updated_line_indices = match applied.line_index_update {
+                    lsp_utils::LineIndexUpdate::Reuse => Some(file.newline_indices.clone()),
+                    lsp_utils::LineIndexUpdate::Shift {
+                        end,
+                        removed_len,
+                        inserted_len,
+                    } => file.newline_indices.shifted_after_edit(
+                        old_code,
+                        end,
+                        removed_len,
+                        inserted_len,
+                    ),
+                    lsp_utils::LineIndexUpdate::Rebuild => None,
+                };
                 self.db
                     .store_in_memory_file(path, code.into(), file.super_file.map(|s| s.file));
-                if let Some(line_indices) = reused_line_indices {
+                if let Some(line_indices) = updated_line_indices {
                     self.db
                         .vfs
                         .file_mut(index)
@@ -703,7 +714,7 @@ mod lsp_edit_tests {
     }
 
     #[test]
-    fn same_length_edit_keeps_later_utf16_positions_correct() {
+    fn sequential_edits_keep_later_utf16_positions_correct() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());
         options.settings.add_global_packages_default = false;
@@ -712,7 +723,7 @@ mod lsp_edit_tests {
         let path = PathWithScheme::with_file_scheme(
             vfs.normalize_rc_path(vfs.unchecked_abs_path("/lsp-lines-test.py")),
         );
-        project.store_in_memory_file(path.clone(), "x = 1\nemoji = '😀'\n".into());
+        project.store_in_memory_file(path.clone(), "x = 1\nemoji = '😀'\ntail = 2\n".into());
         let replace = |project: &mut Project, line, start, end, text: &str| {
             project
                 .store_file_with_lsp_changes(
@@ -734,9 +745,10 @@ mod lsp_edit_tests {
         };
         replace(&mut project, 0, 0, 1, "y");
         replace(&mut project, 1, 9, 11, "z");
+        replace(&mut project, 2, 7, 8, "3");
         assert_eq!(
             project.code_of_in_memory_file(&path),
-            Some("y = 1\nemoji = 'z'\n")
+            Some("y = 1\nemoji = 'z'\ntail = 3\n")
         );
     }
 }

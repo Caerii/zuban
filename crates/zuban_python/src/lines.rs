@@ -22,6 +22,25 @@ impl NewlineIndices {
         Self(OnceLock::new())
     }
 
+    /// Reuse known line starts when a single edit changes bytes without
+    /// changing any newline. The caller verifies that condition.
+    pub fn shifted_after_edit(
+        &self,
+        old_code: &str,
+        end: usize,
+        removed_len: usize,
+        inserted_len: usize,
+    ) -> Option<Self> {
+        let mut lines = self.lines(old_code).to_vec();
+        for offset in lines.iter_mut().filter(|offset| **offset as usize > end) {
+            let shifted = (*offset as usize)
+                .checked_sub(removed_len)?
+                .checked_add(inserted_len)?;
+            *offset = shifted.try_into().ok()?;
+        }
+        Some(Self(OnceLock::from(Arc::from(lines))))
+    }
+
     fn lines(&self, code: &str) -> &[CodeIndex] {
         self.0.get_or_init(|| {
             let mut v = vec![];
@@ -305,6 +324,55 @@ impl<'code> PositionInfos<'code> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_shifted_line_indices_match_fresh_scan() {
+        for (old, end, removed, inserted, new) in [
+            ("a\nb\nc\n", 1, 0, 2, "aXX\nb\nc\n"),
+            ("abc\nb\nc\n", 3, 2, 0, "a\nb\nc\n"),
+            ("a\n😀b\nc\n", 6, 0, 1, "a\n😀Xb\nc\n"),
+            ("a\r\nb\r\nc\r\n", 4, 0, 2, "a\r\nbYY\r\nc\r\n"),
+        ] {
+            let shifted = NewlineIndices::new()
+                .shifted_after_edit(old, end, removed, inserted)
+                .unwrap();
+            assert_eq!(shifted.lines(new), NewlineIndices::new().lines(new));
+        }
+    }
+
+    #[test]
+    fn test_shifted_line_indices_for_non_newline_edits() {
+        for old in ["a\nb\n", "a\r\nb\r\n", "é\n😀x\n", "a\rb\n"] {
+            let old_indices = NewlineIndices::new();
+            for start in 0..=old.len() {
+                if !old.is_char_boundary(start) {
+                    continue;
+                }
+                for end in start..=old.len() {
+                    if !old.is_char_boundary(end) || old[start..end].contains(['\r', '\n']) {
+                        continue;
+                    }
+                    for inserted in ["", "x", "é"] {
+                        if old.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\r')
+                            && old.as_bytes().get(end) == Some(&b'\n')
+                            && (start == end || inserted.is_empty())
+                        {
+                            continue;
+                        }
+                        let new = format!("{}{}{}", &old[..start], inserted, &old[end..]);
+                        let shifted = old_indices
+                            .shifted_after_edit(old, end, end - start, inserted.len())
+                            .unwrap();
+                        assert_eq!(
+                            shifted.lines(&new),
+                            NewlineIndices::new().lines(&new),
+                            "old={old:?} start={start} end={end} inserted={inserted:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_newline_indices_no_line() {

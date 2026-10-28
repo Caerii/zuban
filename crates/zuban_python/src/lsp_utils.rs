@@ -7,7 +7,18 @@ use crate::{InputPosition, lines::NewlineIndices};
 
 pub(crate) struct AppliedDocumentChanges<'a> {
     pub code: Cow<'a, str>,
-    pub reuse_line_indices: bool,
+    pub line_index_update: LineIndexUpdate,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LineIndexUpdate {
+    Reuse,
+    Shift {
+        end: usize,
+        removed_len: usize,
+        inserted_len: usize,
+    },
+    Rebuild,
 }
 
 pub(crate) fn apply_document_changes_with_metadata<'a>(
@@ -19,7 +30,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
     if content_changes.is_empty() {
         return Ok(AppliedDocumentChanges {
             code: Cow::Borrowed(file_contents),
-            reuse_line_indices: true,
+            line_index_update: LineIndexUpdate::Reuse,
         });
     }
     // A single incremental edit can construct the new document in one pass.
@@ -39,15 +50,33 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
         if file_contents[start..end] == change.text {
             return Ok(AppliedDocumentChanges {
                 code: Cow::Borrowed(file_contents),
-                reuse_line_indices: true,
+                line_index_update: LineIndexUpdate::Reuse,
             });
         }
-        // With equal byte lengths and no newline in either span, all line starts stay put.
-        let reuse_line_indices = end - start == change.text.len()
-            && !file_contents[start..end]
-                .bytes()
-                .chain(change.text.bytes())
-                .any(|byte| byte == b'\n' || byte == b'\r');
+        let removed_len = end - start;
+        let inserted_len = change.text.len();
+        let no_newlines = !file_contents[start..end]
+            .bytes()
+            .chain(change.text.bytes())
+            .any(|byte| byte == b'\n' || byte == b'\r');
+        let line_index_update = if !no_newlines {
+            LineIndexUpdate::Rebuild
+        } else if removed_len == inserted_len {
+            // Equal byte lengths leave all following line starts unchanged.
+            LineIndexUpdate::Reuse
+        } else if file_contents.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\r')
+            && file_contents.as_bytes().get(end) == Some(&b'\n')
+            && (removed_len == 0 || inserted_len == 0)
+        {
+            // An insertion can split CRLF; a deletion can join CR and LF.
+            LineIndexUpdate::Rebuild
+        } else {
+            LineIndexUpdate::Shift {
+                end,
+                removed_len,
+                inserted_len,
+            }
+        };
         let mut text =
             String::with_capacity(file_contents.len() - (end - start) + change.text.len());
         text.push_str(&file_contents[..start]);
@@ -55,7 +84,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
         text.push_str(&file_contents[end..]);
         return Ok(AppliedDocumentChanges {
             code: Cow::Owned(text),
-            reuse_line_indices,
+            line_index_update,
         });
     }
 
@@ -108,7 +137,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
             text.push_str(&file_contents[cursor..]);
             return Ok(AppliedDocumentChanges {
                 code: Cow::Owned(text),
-                reuse_line_indices: false,
+                line_index_update: LineIndexUpdate::Rebuild,
             });
         }
     }
@@ -129,12 +158,12 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
         return if text == file_contents {
             Ok(AppliedDocumentChanges {
                 code: Cow::Borrowed(file_contents),
-                reuse_line_indices: true,
+                line_index_update: LineIndexUpdate::Reuse,
             })
         } else {
             Ok(AppliedDocumentChanges {
                 code: Cow::Owned(text),
-                reuse_line_indices: false,
+                line_index_update: LineIndexUpdate::Rebuild,
             })
         };
     }
@@ -168,7 +197,7 @@ pub(crate) fn apply_document_changes_with_metadata<'a>(
     }
     Ok(AppliedDocumentChanges {
         code: Cow::Owned(text),
-        reuse_line_indices: false,
+        line_index_update: LineIndexUpdate::Rebuild,
     })
 }
 
@@ -283,10 +312,37 @@ mod tests {
             )
             .unwrap()
         };
-        assert!(apply(change(0, 0, 0, 1, "y")).reuse_line_indices);
-        assert!(!apply(change(0, 0, 0, 1, "longer")).reuse_line_indices);
-        assert!(!apply(change(0, 0, 0, 1, "\n")).reuse_line_indices);
-        assert!(!apply(change(0, 0, 1, 0, "y = 1\n")).reuse_line_indices);
+        assert_eq!(
+            apply(change(0, 0, 0, 1, "y")).line_index_update,
+            LineIndexUpdate::Reuse
+        );
+        assert_eq!(
+            apply(change(0, 0, 0, 1, "longer")).line_index_update,
+            LineIndexUpdate::Shift {
+                end: 1,
+                removed_len: 1,
+                inserted_len: 6,
+            }
+        );
+        assert_eq!(
+            apply(change(0, 0, 0, 1, "\n")).line_index_update,
+            LineIndexUpdate::Rebuild
+        );
+        assert_eq!(
+            apply(change(0, 0, 1, 0, "y = 1\n")).line_index_update,
+            LineIndexUpdate::Rebuild
+        );
+        let crlf = apply_document_changes_with_metadata(
+            "a\rx\n",
+            &NewlineIndices::new(),
+            vec![change(1, 0, 1, 1, "")],
+            |pos| InputPosition::CodePoints {
+                line: pos.line as usize,
+                column: pos.character as usize,
+            },
+        )
+        .unwrap();
+        assert_eq!(crlf.line_index_update, LineIndexUpdate::Rebuild);
     }
 
     #[test]
