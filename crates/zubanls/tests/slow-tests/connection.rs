@@ -1,6 +1,6 @@
 use std::{cell::Cell, path::Path, str::FromStr, time::Duration};
 
-use crossbeam_channel::RecvTimeoutError;
+use crossbeam_channel::{Receiver, RecvTimeoutError, bounded};
 use lsp_server::{Message, RequestId};
 use lsp_types::{
     DiagnosticClientCapabilities, DiagnosticWorkspaceClientCapabilities,
@@ -29,6 +29,7 @@ pub(crate) fn path_to_uri(path: &str) -> Url {
 pub(crate) struct Connection {
     client: lsp_server::Connection,
     server_thread: Option<std::thread::JoinHandle<()>>,
+    server_finished: Receiver<()>,
     request_id_counter: Cell<i32>,
     pub server_capabilities: Option<ServerCapabilities>,
 }
@@ -37,21 +38,24 @@ impl Connection {
     pub(crate) fn new() -> Self {
         logging_config::setup_logging_for_tests();
         let (connection1, connection2) = lsp_server::Connection::memory();
+        let (finished_tx, server_finished) = bounded(1);
 
         let server_thread = Some(std::thread::spawn(move || {
             let typeshed_path = Some(test_utils::typeshed_path());
-            zubanls::run_server_with_custom_connection(
+            let result = zubanls::run_server_with_custom_connection(
                 Default::default(),
                 connection1,
                 typeshed_path,
                 || Ok(()),
-            )
-            .expect("Should not error");
+            );
+            let _ = finished_tx.try_send(());
+            result.expect("Should not error");
         }));
 
         Self {
             client: connection2,
             server_thread,
+            server_finished,
             request_id_counter: Cell::new(0),
             server_capabilities: None,
         }
@@ -294,14 +298,9 @@ impl Drop for Connection {
         }
         assert!(self.client.receiver.is_empty());
         if let Some(server_thread) = self.server_thread.take() {
-            let mut counter = 0;
-            const MAX_MS: usize = 5000;
-            while !server_thread.is_finished() && counter < MAX_MS {
-                std::thread::sleep(Duration::from_millis(1));
-                counter += 1;
-            }
-            if counter >= MAX_MS {
-                panic!("A thread was not joined properly");
+            match self.server_finished.recv_timeout(Duration::from_secs(5)) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => {}
+                Err(RecvTimeoutError::Timeout) => panic!("A thread was not joined properly"),
             }
             server_thread
                 .join()
