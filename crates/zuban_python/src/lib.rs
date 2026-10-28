@@ -1352,6 +1352,82 @@ mod lsp_edit_tests {
             let expected_diagnostics = format!("{:?}", fresh.document(&path).unwrap().diagnostics());
             prop_assert_eq!(actual_diagnostics, expected_diagnostics);
         }
+
+        #[test]
+        fn repeated_reference_edits_match_fresh_analysis(
+            edits in prop::collection::vec((0usize..4, 0usize..4), 2..5),
+        ) {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-repeated-reference-edits.py")),
+            );
+            let mut code = String::from("alpha = 1\ndelta = 'x'\nbeta_name = 2\n");
+            for index in 0..128 {
+                code.push_str(&format!("name_{index} = {index}\n"));
+            }
+            let first_reference_line = code.bytes().filter(|&byte| byte == b'\n').count();
+            code.push_str("alpha + 1\nalpha + 1\nalpha + 1\nalpha + 1\n");
+            let mut references = ["alpha"; 4];
+            project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+            let _ = project.document(&path).unwrap().diagnostics();
+            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+
+            for (step, (slot, replacement_kind)) in edits.into_iter().enumerate() {
+                let replacement = ["alpha", "delta", "beta_name", "unknown_long"][replacement_kind];
+                let previous = references[slot];
+                let line = first_reference_line + slot;
+                let start = code.lines().take(line).map(|line| line.len() + 1).sum::<usize>();
+                code.replace_range(start..start + previous.len(), replacement);
+                references[slot] = replacement;
+                project.store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(line as u32, 0),
+                            Position::new(line as u32, previous.len() as u32),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                ).unwrap();
+
+                // Use a new virtual file each time, so the oracle cannot reuse its
+                // previous parse, bindings, or diagnostics.
+                let fresh_path = PathWithScheme::with_file_scheme(
+                    fresh.vfs_handler().normalize_rc_path(fresh.vfs_handler().unchecked_abs_path(
+                        &format!("/property-repeated-reference-edits-{step}.py"),
+                    )),
+                );
+                fresh.store_in_memory_file(fresh_path.clone(), code.clone().into_boxed_str());
+                prop_assert_eq!(project.code_of_in_memory_file(&path).unwrap(), code.as_str());
+                let mut actual_document = project.document(&path).unwrap();
+                let mut expected_document = fresh.document(&fresh_path).unwrap();
+                let actual = actual_document.diagnostics();
+                let expected = expected_document.diagnostics();
+                let signature = |diagnostic: &diagnostics::Diagnostic<'_>| {
+                    let start = diagnostic.start_position();
+                    let end = diagnostic.end_position();
+                    (
+                        (start.line_zero_based(), start.utf8_bytes_column()),
+                        (end.line_zero_based(), end.utf8_bytes_column()),
+                        diagnostic.mypy_error_code(),
+                        diagnostic.message(),
+                    )
+                };
+                prop_assert_eq!(
+                    actual.iter().map(signature).collect::<Vec<_>>(),
+                    expected.iter().map(signature).collect::<Vec<_>>(),
+                );
+            }
+        }
     }
 
     #[test]
