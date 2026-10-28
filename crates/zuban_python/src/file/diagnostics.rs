@@ -139,7 +139,9 @@ impl Inference<'_, '_, '_> {
         let indent = debug_indent();
         let result = self.ensure_module_symbols_flow_analysis();
         self.file.process_delayed_diagnostics(self.i_s.db);
-        self.file.issues.set_complete_diagnostics();
+        if result.is_ok() {
+            self.file.issues.set_complete_diagnostics();
+        }
         drop(indent);
         debug!(
             "End of module analysis for {} ({})",

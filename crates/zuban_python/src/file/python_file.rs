@@ -1653,6 +1653,29 @@ mod stored_complex_point_tests {
     }
 
     #[test]
+    fn interrupted_module_analysis_can_complete_on_retry() {
+        let mut options = crate::ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = crate::test_project::new(options);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/interrupted-analysis.py")),
+        );
+        project.store_in_memory_file(path.clone(), "value: int = 1\n".into());
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let file = project.db.loaded_python_file(index);
+
+        file.points.set(0, Point::new_calculating());
+        assert!(file.ensure_calculated_diagnostics(&project.db).is_err());
+        assert!(!file.issues.is_complete());
+
+        file.points.set(0, Point::new_uncalculated());
+        file.ensure_calculated_diagnostics(&project.db).unwrap();
+        assert!(file.has_calculated_diagnostics());
+    }
+
+    #[test]
     fn tail_replay_shares_immutable_inference_and_keeps_appended_indices_stable() {
         let binding_points = Points::new(4);
         let mut original = ComplexValues::default();
