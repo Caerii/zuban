@@ -804,16 +804,11 @@ impl Frame {
             return true;
         }
         self.ensure_name_index();
-        if self
-            .initial_name_index
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .first_positions
-            .contains_key(&name)
-        {
+        let index = self.initial_name_index.get_mut().as_mut().unwrap();
+        let std::collections::hash_map::Entry::Vacant(vacant) = index.first_positions.entry(name)
+        else {
             return false;
-        }
+        };
         let position = self.entries.len();
         self.entries.push(Entry {
             key: FlowKey::Name(name),
@@ -822,8 +817,7 @@ impl Frame {
             deleted: false,
             widens: false,
         });
-        let index = self.initial_name_index.get_mut().as_mut().unwrap();
-        index.first_positions.insert(name, position);
+        vacant.insert(position);
         index.indexed_len += 1;
         true
     }
