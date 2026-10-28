@@ -5,12 +5,15 @@ use lsp_types::{Position, TextDocumentContentChangeEvent};
 
 use crate::{InputPosition, lines::NewlineIndices};
 
-pub(crate) fn apply_document_changes(
-    file_contents: &str,
+pub(crate) fn apply_document_changes<'a>(
+    file_contents: &'a str,
     line_indices: &NewlineIndices,
     mut content_changes: Vec<TextDocumentContentChangeEvent>,
     to_input_position: impl Fn(Position) -> InputPosition,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Cow<'a, str>> {
+    if content_changes.is_empty() {
+        return Ok(Cow::Borrowed(file_contents));
+    }
     // A single incremental edit can construct the new document in one pass.
     // Copying the old text and then replacing a range moves its suffix twice.
     if let [change] = content_changes.as_slice()
@@ -25,12 +28,15 @@ pub(crate) fn apply_document_changes(
         let end = line_indices
             .line_column_to_safe_byte(file_contents, to_input_position(range.end))?
             as usize;
+        if file_contents[start..end] == change.text {
+            return Ok(Cow::Borrowed(file_contents));
+        }
         let mut text =
             String::with_capacity(file_contents.len() - (end - start) + change.text.len());
         text.push_str(&file_contents[..start]);
         text.push_str(&change.text);
         text.push_str(&file_contents[end..]);
-        return Ok(text);
+        return Ok(Cow::Owned(text));
     }
 
     // Small buffers and same-length edits are cheaper to update in place.
@@ -80,7 +86,7 @@ pub(crate) fn apply_document_changes(
                 cursor = end;
             }
             text.push_str(&file_contents[cursor..]);
-            return Ok(text);
+            return Ok(Cow::Owned(text));
         }
     }
 
@@ -97,7 +103,11 @@ pub(crate) fn apply_document_changes(
         None => (file_contents.to_string(), &content_changes[..], false),
     };
     if content_changes.is_empty() {
-        return Ok(text);
+        return if text == file_contents {
+            Ok(Cow::Borrowed(file_contents))
+        } else {
+            Ok(Cow::Owned(text))
+        };
     }
 
     let mut line_indices = if has_full_replacement {
@@ -127,7 +137,7 @@ pub(crate) fn apply_document_changes(
             text.replace_range(start as usize..end as usize, &change.text);
         }
     }
-    Ok(text)
+    Ok(Cow::Owned(text))
 }
 
 #[cfg(test)]
@@ -146,6 +156,7 @@ mod tests {
                 column: pos.character as usize,
             }
         })
+        .map(Cow::into_owned)
     }
 
     fn expect_valid_apply_document_change(
@@ -176,6 +187,37 @@ mod tests {
             range_length: None,
             text: new_text.into(),
         }
+    }
+
+    #[test]
+    fn test_unchanged_edits_borrow_original_text() {
+        let code = "first\nsecond\n";
+        let apply = |changes| {
+            apply_document_changes(code, &NewlineIndices::new(), changes, |pos| {
+                InputPosition::CodePoints {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                }
+            })
+            .unwrap()
+        };
+        assert!(matches!(apply(vec![]), Cow::Borrowed(_)));
+        assert!(matches!(
+            apply(vec![change(1, 0, 1, 6, "second")]),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            apply(vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: code.into(),
+            }]),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            apply(vec![change(1, 0, 1, 6, "changed")]),
+            Cow::Owned(_)
+        ));
     }
 
     #[test]

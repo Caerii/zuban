@@ -157,8 +157,21 @@ impl Project {
             content_changes,
             to_input_position,
         )?;
-        self.db
-            .store_in_memory_file(path, code.into(), file.super_file.map(|s| s.file));
+        match code {
+            std::borrow::Cow::Owned(code) => {
+                self.db
+                    .store_in_memory_file(path, code.into(), file.super_file.map(|s| s.file))
+            }
+            std::borrow::Cow::Borrowed(_) => {
+                self.db
+                    .vfs
+                    .handler
+                    .on_invalidated_in_memory_file(vfs::InvalidatedInMemoryFile {
+                        path,
+                        maybe_from_outside_of_in_memory_files: false,
+                    });
+            }
+        }
         Ok(())
     }
 
@@ -631,4 +644,51 @@ impl Diagnostics<'_> {
 pub struct PanicRecovery {
     vfs: vfs::VfsPanicRecovery<Tree>,
     run_cause: RunCause,
+}
+
+#[cfg(test)]
+mod lsp_noop_tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use lsp_types::{Range, TextDocumentContentChangeEvent};
+
+    use super::*;
+
+    #[test]
+    fn unchanged_lsp_edit_preserves_invalidation_notification() {
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let notified = notifications.clone();
+        let fs = LocalFS::with_watcher(move |_| {
+            notified.fetch_add(1, Ordering::Relaxed);
+        });
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::new(Box::new(fs), options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/lsp-noop-test.py")),
+        );
+        project.store_in_memory_file(path.clone(), "x = 1\n".into());
+        let before = notifications.load(Ordering::Relaxed);
+        project
+            .store_file_with_lsp_changes(
+                path.clone(),
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(Position::new(0, 4), Position::new(0, 5))),
+                    range_length: None,
+                    text: "1".into(),
+                }],
+                |pos| InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            )
+            .unwrap();
+        assert_eq!(project.code_of_in_memory_file(&path), Some("x = 1\n"));
+        assert_eq!(notifications.load(Ordering::Relaxed), before + 1);
+    }
 }

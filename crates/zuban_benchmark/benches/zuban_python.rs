@@ -207,6 +207,30 @@ fn bench_warm_lsp_edit(c: &mut Criterion) {
     });
 }
 
+fn bench_unchanged_lsp_edit(c: &mut Criterion) {
+    let (mut project, paths) = prepare_independent_files(1000);
+    check_prepared_files(&mut project, paths.clone());
+    let path = paths[0].clone();
+    c.bench_function("unchanged LSP edit among 1000 prepared files", |b| {
+        b.iter(|| {
+            let change = TextDocumentContentChangeEvent {
+                range: Some(Range::new(Position::new(2, 11), Position::new(2, 12))),
+                range_length: None,
+                text: "x".into(),
+            };
+            project
+                .store_file_with_lsp_changes(path.clone(), vec![change], |pos| {
+                    InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    }
+                })
+                .unwrap();
+            std::hint::black_box(project.code_of_in_memory_file(&path));
+        })
+    });
+}
+
 fn bench_warm_multi_lsp_edit(c: &mut Criterion, edit_count: u32) {
     let (mut project, paths) = prepare_independent_files(1000);
     let edited_path = paths[0].clone();
@@ -419,6 +443,7 @@ fn bench_type_checking(c: &mut Criterion) {
     bench_warm_edit_stage(c, "edit stage of deep prepared file", true, true);
     bench_warm_edit_stage(c, "check stage of deep prepared file", false, true);
     bench_warm_lsp_edit(c);
+    bench_unchanged_lsp_edit(c);
     bench_warm_multi_lsp_edit(c, 32);
     bench_warm_multi_lsp_edit(c, 256);
     bench_large_reverse_lsp_edit(c);
