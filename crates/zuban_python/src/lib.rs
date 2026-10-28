@@ -967,6 +967,77 @@ mod lsp_edit_tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
         #[test]
+        fn dependency_chain_edit_matches_fresh_analysis(
+            chain_len in 65usize..129,
+            replacement_kind in 0usize..4,
+            suffix_kind in 0usize..3,
+        ) {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-chain-edit.py")),
+            );
+            let mut code = String::from("alpha = 1\ndelta = 'x'\nname_0 = alpha\n");
+            for index in 1..chain_len {
+                code.push_str(&format!("name_{index} = name_{}\n", index - 1));
+            }
+            let last = chain_len - 1;
+            match suffix_kind {
+                0 => code.push_str(&format!("name_{last}\n")),
+                1 => code.push_str(&format!("name_{last} + 1\n")),
+                _ => code.push_str(&format!("reveal_type(name_{last})\n")),
+            }
+            let replacement = ["delta", "omega", "42", "alpha + 1"][replacement_kind];
+            let mut updated = code.clone();
+            let start = code.find("name_0 = alpha").unwrap() + "name_0 = ".len();
+            updated.replace_range(start..start + 5, replacement);
+
+            project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+            // Populate the old inference cache before applying the edit.
+            let _ = project.document(&path).unwrap().diagnostics();
+            project.store_file_with_lsp_changes(
+                path.clone(),
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(Position::new(2, 9), Position::new(2, 14))),
+                    range_length: None,
+                    text: replacement.into(),
+                }],
+                |pos| InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            ).unwrap();
+            let mut fresh = Project::without_watcher(options, RunCause::TypeChecking);
+            fresh.store_in_memory_file(path.clone(), updated.clone().into_boxed_str());
+            let actual_diagnostics = format!("{:?}", project.document(&path).unwrap().diagnostics());
+            let expected_diagnostics = format!("{:?}", fresh.document(&path).unwrap().diagnostics());
+            prop_assert_eq!(project.code_of_in_memory_file(&path).unwrap(), updated.as_str());
+            prop_assert_eq!(actual_diagnostics, expected_diagnostics);
+
+            project.store_file_with_lsp_changes(
+                path.clone(),
+                vec![TextDocumentContentChangeEvent {
+                    range: Some(Range::new(Position::new(2, 9), Position::new(2, 9 + replacement.len() as u32))),
+                    range_length: None,
+                    text: "alpha".into(),
+                }],
+                |pos| InputPosition::Utf16CodeUnits {
+                    line: pos.line as usize,
+                    column: pos.character as usize,
+                },
+            ).unwrap();
+            fresh.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+            prop_assert_eq!(project.code_of_in_memory_file(&path).unwrap(), code.as_str());
+            prop_assert_eq!(
+                format!("{:?}", project.document(&path).unwrap().diagnostics()),
+                format!("{:?}", fresh.document(&path).unwrap().diagnostics()),
+            );
+        }
+
+        #[test]
         fn incremental_name_edit_matches_fresh_binding(
             preceding_references in 0usize..4,
             body_kind in 0usize..6,
