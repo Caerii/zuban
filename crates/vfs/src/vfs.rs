@@ -31,6 +31,9 @@ pub(crate) fn file_scheme() -> Scheme {
 pub trait VfsFile: Unpin {
     type Artifacts;
     fn code(&self) -> &str;
+    fn code_matches_input(&self, input: &str) -> bool {
+        self.code() == input
+    }
     fn into_recoverable_artifacts(self) -> Self::Artifacts;
     fn invalidate_references_to(&mut self, file_index: Option<FileIndex>);
 }
@@ -447,8 +450,11 @@ impl<F: VfsFile> Vfs<F> {
             return None;
         }
         let state = self.file_state(index);
-        (state.code() == Some(code) && state.file_entry.get_file_index() == Some(index))
-            .then_some(index)
+        (state
+            .file()
+            .is_some_and(|file| file.code_matches_input(code))
+            && state.file_entry.get_file_index() == Some(index))
+        .then_some(index)
     }
 
     pub fn has_in_memory_path(&self, path: &PathWithScheme) -> bool {
@@ -509,7 +515,11 @@ impl<F: VfsFile> Vfs<F> {
             });
         let mut result = InvalidationResult::InvalidatedFiles;
         if let Some(file_index) = in_mem_file {
-            if self.file_state(file_index).code() == Some(&code) {
+            if self
+                .file_state(file_index)
+                .file()
+                .is_some_and(|file| file.code_matches_input(&code))
+            {
                 // It already exists with the same code, we can therefore skip generating a new
                 // file.
                 self.validated_file_epochs.resize(

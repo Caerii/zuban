@@ -794,6 +794,37 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn parser_added_newlines_do_not_reparse_unchanged_buffers() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        for (i, input) in ["x = 1", "x = 1\\", "x = 1\\\n", "x = 1\\\r\n"]
+            .into_iter()
+            .enumerate()
+        {
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path(&format!("/normalized-{i}.py"))),
+            );
+            project.store_in_memory_file(path.clone(), input.into());
+            let before = project.code_of_in_memory_file(&path).unwrap().as_ptr();
+            assert!(
+                project
+                    .db
+                    .vfs
+                    .unchanged_in_memory_file(&path, input)
+                    .is_some()
+            );
+            project.store_in_memory_file(path.clone(), input.into());
+            assert_eq!(
+                project.code_of_in_memory_file(&path).unwrap().as_ptr(),
+                before
+            );
+        }
+    }
+
+    #[test]
     fn sequential_edits_keep_later_utf16_positions_correct() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());

@@ -54,6 +54,10 @@ impl Tree {
         self.0.as_code()
     }
 
+    pub fn code_matches_input(&self, input: &str) -> bool {
+        parsa_python::parsed_code_matches_input(self.code(), input)
+    }
+
     pub fn root(&self) -> File<'_> {
         File::new(self.0.root_node())
     }

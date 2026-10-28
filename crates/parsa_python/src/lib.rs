@@ -449,17 +449,31 @@ create_grammar!(
 pub fn parse(code: Box<str>) -> PyTree {
     let mut code = code.into_string();
     // TODO is this really the best way? Especially for refactoring?!
-    {
-        if !code.ends_with('\n') {
-            code += "\n";
-        }
-        if code.ends_with("\\\n") || code.ends_with("\\\r\n") {
-            // Must end with a proper newline
-            code += "\n";
-        }
+    for _ in 0..appended_newlines(&code) {
+        code.push('\n');
     }
 
     PYTHON_GRAMMAR.parse(code.into())
+}
+
+fn appended_newlines(code: &str) -> usize {
+    let needs_final_newline = !code.ends_with('\n');
+    let ends_with_continuation = if needs_final_newline {
+        code.ends_with('\\') || code.ends_with("\\\r")
+    } else {
+        code.ends_with("\\\n") || code.ends_with("\\\r\n")
+    };
+    usize::from(needs_final_newline) + usize::from(ends_with_continuation)
+}
+
+/// Whether parsing `input` would produce `parsed`, including parser-added newlines.
+pub fn parsed_code_matches_input(parsed: &str, input: &str) -> bool {
+    let added = appended_newlines(input);
+    parsed.len() == input.len() + added
+        && parsed.starts_with(input)
+        && parsed.as_bytes()[input.len()..]
+            .iter()
+            .all(|&byte| byte == b'\n')
 }
 
 pub fn keywords_contain(keyword: &str) -> bool {
@@ -469,6 +483,26 @@ pub fn keywords_contain(keyword: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parser_added_newlines_match_original_input() {
+        for input in [
+            "x = 1",
+            "x = 1\n",
+            "x = 1\\",
+            "x = 1\\\r",
+            "x = 1\\\n",
+            "x = 1\\\r\n",
+        ] {
+            let parsed = parse(input.into());
+            assert!(
+                parsed_code_matches_input(parsed.as_code(), input),
+                "{input:?}"
+            );
+            assert!(!parsed_code_matches_input(parsed.as_code(), "different"));
+        }
+    }
+
     #[test]
     fn test_grammar() {
         let tree = parse("{foo: 1}\n".into());

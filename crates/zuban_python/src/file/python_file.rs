@@ -245,6 +245,10 @@ impl vfs::VfsFile for PythonFile {
         self.tree.code()
     }
 
+    fn code_matches_input(&self, input: &str) -> bool {
+        self.tree.code_matches_input(input)
+    }
+
     fn into_recoverable_artifacts(self) -> Tree {
         self.tree
     }
