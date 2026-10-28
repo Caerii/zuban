@@ -2573,3 +2573,85 @@ def f(box: Box) -> None:
         assert_type(box.value, int)
         box = Box()
         assert_type(box.value, int | str)
+
+[case many_unrelated_entries_preserve_index_narrowing]
+from typing import assert_type
+
+class Box:
+    values: list[int | str]
+
+def f(box: Box) -> None:
+    if isinstance(box.values[0], int):
+        indexed_0 = 0
+        indexed_1 = 1
+        indexed_2 = 2
+        indexed_3 = 3
+        indexed_4 = 4
+        indexed_5 = 5
+        indexed_6 = 6
+        indexed_7 = 7
+        indexed_8 = 8
+        indexed_9 = 9
+        indexed_10 = 10
+        indexed_11 = 11
+        indexed_12 = 12
+        indexed_13 = 13
+        indexed_14 = 14
+        indexed_15 = 15
+        indexed_16 = 16
+        indexed_17 = 17
+        indexed_18 = 18
+        indexed_19 = 19
+        indexed_20 = 20
+        indexed_21 = 21
+        indexed_22 = 22
+        indexed_23 = 23
+        indexed_24 = 24
+        indexed_25 = 25
+        indexed_26 = 26
+        indexed_27 = 27
+        indexed_28 = 28
+        indexed_29 = 29
+        indexed_30 = 30
+        indexed_31 = 31
+        indexed_32 = 32
+        indexed_33 = 33
+        indexed_34 = 34
+        indexed_35 = 35
+        indexed_36 = 36
+        indexed_37 = 37
+        indexed_38 = 38
+        indexed_39 = 39
+        indexed_40 = 40
+        indexed_41 = 41
+        indexed_42 = 42
+        indexed_43 = 43
+        indexed_44 = 44
+        indexed_45 = 45
+        indexed_46 = 46
+        indexed_47 = 47
+        indexed_48 = 48
+        indexed_49 = 49
+        indexed_50 = 50
+        indexed_51 = 51
+        indexed_52 = 52
+        indexed_53 = 53
+        indexed_54 = 54
+        indexed_55 = 55
+        indexed_56 = 56
+        indexed_57 = 57
+        indexed_58 = 58
+        indexed_59 = 59
+        indexed_60 = 60
+        indexed_61 = 61
+        indexed_62 = 62
+        indexed_63 = 63
+        indexed_64 = 64
+        indexed_65 = 65
+        indexed_66 = 66
+        indexed_67 = 67
+        indexed_68 = 68
+        indexed_69 = 69
+        assert_type(box.values[0], int)
+        box = Box()
+        assert_type(box.values[0], int | str)
