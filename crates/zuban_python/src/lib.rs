@@ -179,9 +179,11 @@ impl Project {
                                     end,
                                     replacement_len,
                                     source_address: code.as_ptr() as usize,
-                                    reference_binding: (replacement_len == end - start)
-                                        .then(|| file.reference_binding_candidate(start, end))
-                                        .flatten(),
+                                    reference_binding: file.reference_binding_candidate(
+                                        start,
+                                        end,
+                                        replacement_len,
+                                    ),
                                 })
                         });
                 let updated_line_indices = match applied.line_index_update {
@@ -973,14 +975,14 @@ mod lsp_edit_tests {
             project
                 .db
                 .loaded_python_file(index)
-                .reference_binding_candidate(start, start + 5)
+                .reference_binding_candidate(start, start + 5, 5)
                 .is_some()
         );
         assert!(
             project
                 .db
                 .loaded_python_file(index)
-                .reference_binding_candidate(start - 6, start - 1)
+                .reference_binding_candidate(start - 6, start - 1, 5)
                 .is_some()
         );
 
@@ -1032,6 +1034,55 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn length_changing_standalone_reference_reuses_binding() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/length-reference-binding.py")),
+        );
+        let mut code = String::from("alpha = 1\nbeta_name = 2\n");
+        for index in 0..700 {
+            code.push_str(&format!("name_{index} = {index}\n"));
+        }
+        let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
+        code.push_str("alpha\ntail = 42\n");
+        project.store_in_memory_file(path.clone(), code.into_boxed_str());
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let original_table = project.db.loaded_python_file(index).symbol_table.clone();
+        for (old, replacement) in [("alpha", "beta_name"), ("beta_name", "alpha")] {
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(line, 0),
+                            Position::new(line, old.len() as u32),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            let file = project.db.loaded_python_file(index);
+            assert!(Arc::ptr_eq(&original_table, &file.symbol_table));
+            assert!(project.document(&path).unwrap().diagnostics().is_empty());
+            assert!(
+                project
+                    .code_of_in_memory_file(&path)
+                    .unwrap()
+                    .ends_with(&format!("{replacement}\ntail = 42\n"))
+            );
+        }
+    }
+
+    #[test]
     fn dependency_invalidation_revokes_reference_binding_snapshot() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());
@@ -1053,7 +1104,7 @@ mod lsp_edit_tests {
             project
                 .db
                 .loaded_python_file(index)
-                .reference_binding_candidate(start, start + 5)
+                .reference_binding_candidate(start, start + 5, 5)
                 .is_some()
         );
         vfs::VfsFile::invalidate_references_to(project.db.vfs.file_mut(index).unwrap(), None);
@@ -1061,7 +1112,7 @@ mod lsp_edit_tests {
             project
                 .db
                 .loaded_python_file(index)
-                .reference_binding_candidate(start, start + 5)
+                .reference_binding_candidate(start, start + 5, 5)
                 .is_none()
         );
     }
@@ -1219,7 +1270,7 @@ mod lsp_edit_tests {
         fn incremental_name_edit_matches_fresh_binding(
             preceding_references in 0usize..4,
             body_kind in 0usize..6,
-            replacement_kind in 0usize..4,
+            replacement_kind in 0usize..6,
             repeated_delta in any::<bool>(),
         ) {
             let mut options = ProjectOptions::default();
@@ -1231,7 +1282,7 @@ mod lsp_edit_tests {
                 vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-reference-binding.py")),
             );
 
-            let mut code = String::from("alpha = 1\ndelta = 2\n");
+            let mut code = String::from("alpha = 1\ndelta = 2\nbeta_name = 3\n");
             for index in 0..700 {
                 code.push_str(&format!("name_{index} = {index}\n"));
             }
@@ -1253,11 +1304,17 @@ mod lsp_edit_tests {
             let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
             let start = code.len() + column;
             code.push_str(reference_line);
-            let replacement = ["alpha", "delta", "omega", "bravo"][replacement_kind];
+            let replacement = ["alpha", "delta", "omega", "bravo", "beta_name", "unknown_long"][replacement_kind];
             let mut updated = code.clone();
             updated.replace_range(start..start + 5, replacement);
 
             project.store_in_memory_file(path.clone(), code.into_boxed_str());
+            let original_index = project.db.vfs.in_memory_file(&path).unwrap();
+            let original_file = project.db.loaded_python_file(original_index);
+            let previous_table = original_file.symbol_table.clone();
+            let eligible = original_file
+                .reference_binding_candidate(start, start + 5, replacement.len())
+                .is_some();
             project.store_file_with_lsp_changes(
                 path.clone(),
                 vec![TextDocumentContentChangeEvent {
@@ -1280,6 +1337,12 @@ mod lsp_edit_tests {
             let expected_index = fresh.db.vfs.in_memory_file(&path).unwrap();
             let actual = project.db.loaded_python_file(actual_index);
             let expected = fresh.db.loaded_python_file(expected_index);
+            if replacement != "alpha" {
+                prop_assert_eq!(
+                    Arc::ptr_eq(&previous_table, &actual.symbol_table),
+                    eligible && matches!(replacement, "delta" | "beta_name")
+                );
+            }
             prop_assert_eq!(actual.tree.code(), updated.as_str());
             prop_assert_eq!(actual.tree.length(), expected.tree.length());
             let mismatch = actual.points.iter().zip(expected.points.iter())

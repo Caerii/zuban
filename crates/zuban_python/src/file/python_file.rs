@@ -131,7 +131,7 @@ pub(crate) struct ReferenceBindingCandidate {
     name_index: NodeIndex,
     point: Point,
     start: usize,
-    end: usize,
+    replacement_len: usize,
     flags: Option<FinalizedTypeCheckerFlags>,
     ignore_type_errors: Option<IgnoreFileReason>,
 }
@@ -378,6 +378,7 @@ impl<'db> PythonFile {
         &self,
         start: usize,
         end: usize,
+        replacement_len: usize,
     ) -> Option<ReferenceBindingCandidate> {
         let snapshot = self.binding_snapshot.as_ref()?;
         if self.super_file.is_some()
@@ -417,7 +418,7 @@ impl<'db> PythonFile {
             name_index: name.index(),
             point,
             start,
-            end,
+            replacement_len,
             flags: self.flags.clone(),
             ignore_type_errors: self.ignore_type_errors,
         })
@@ -432,7 +433,7 @@ impl<'db> PythonFile {
         let name = Name::by_index(&tree, candidate.name_index);
         if file_index != candidate.file_index
             || name.start() as usize != candidate.start
-            || name.end() as usize != candidate.end
+            || Some(name.end() as usize) != candidate.start.checked_add(candidate.replacement_len)
             || candidate
                 .standalone_module_references
                 .binary_search(&candidate.name_index)
