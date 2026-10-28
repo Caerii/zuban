@@ -150,6 +150,27 @@ mod flow_context_tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn test_flow_key(file: u8, root: u32, index: u8, shape: u8) -> FlowKey {
+        let name = FlowKey::Name(PointLink::new(vfs::FileIndex(file as u32), root));
+        let attr = ["a", "b", "c", "d"][index as usize];
+        let member = || FlowKey::Member(Arc::new(name.clone()), DbString::Static(attr));
+        let indexed = || FlowKey::Index {
+            base_key: Arc::new(name.clone()),
+            node_index: index as u32,
+            match_index: FlowKeyIndex::Int(index as isize),
+        };
+        match shape {
+            0 => indexed(),
+            1 => member(),
+            2 => FlowKey::Member(Arc::new(indexed()), DbString::Static(attr)),
+            _ => FlowKey::Index {
+                base_key: Arc::new(member()),
+                node_index: index as u32,
+                match_index: FlowKeyIndex::Int(index as isize),
+            },
+        }
+    }
+
     fn indexed_entry_position(frame: &Frame, db: &Database, key: &FlowKey) -> Option<usize> {
         frame.lookup_entry(db, key).map(|found| {
             frame
@@ -173,26 +194,7 @@ mod flow_context_tests {
         runner
             .run(&cases, |(entries, queries)| {
                 let mut frame = Frame::new_base_scope();
-                let make_key = |root, index: u8, shape| {
-                    let name = FlowKey::Name(PointLink::new(vfs::FileIndex(1), root));
-                    let attr = ["a", "b", "c", "d"][index as usize];
-                    let member = || FlowKey::Member(Arc::new(name.clone()), DbString::Static(attr));
-                    let indexed = || FlowKey::Index {
-                        base_key: Arc::new(name.clone()),
-                        node_index: index as u32,
-                        match_index: FlowKeyIndex::Int(index as isize),
-                    };
-                    match shape {
-                        0 => indexed(),
-                        1 => member(),
-                        2 => FlowKey::Member(Arc::new(indexed()), DbString::Static(attr)),
-                        _ => FlowKey::Index {
-                            base_key: Arc::new(member()),
-                            node_index: index as u32,
-                            match_index: FlowKeyIndex::Int(index as isize),
-                        },
-                    }
-                };
+                let make_key = |root, index, shape| test_flow_key(1, root, index, shape);
                 for (root, index, shape) in entries {
                     frame.entries.push(Entry {
                         key: make_key(root, index, shape),
@@ -233,6 +235,62 @@ mod flow_context_tests {
                     .retain(|entry| entry.key.root_name().node_index != 99);
                 *frame.initial_name_index.get_mut() = None;
                 prop_assert_eq!(indexed_entry_position(&frame, &project.db, &appended), None);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn complex_flow_lookup_matches_linear_scan_after_frame_updates() {
+        let mut options = config::ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        let project = crate::Project::without_watcher(options, crate::RunCause::TypeChecking);
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(64));
+        let actions = prop::collection::vec((0u8..4, 1u8..4, 0u32..32, 0u8..4, 0u8..4), 1..100);
+        runner
+            .run(&actions, |actions| {
+                let mut frame = Frame::new_base_scope();
+                for i in 0..70u32 {
+                    frame.entries.push(Entry {
+                        key: test_flow_key((i % 3 + 1) as u8, i % 8, (i % 4) as u8, (i % 4) as u8),
+                        type_: EntryKind::OriginalDeclaration,
+                        modifies_ancestors: true,
+                        deleted: false,
+                        widens: false,
+                    });
+                }
+                let first_key = frame.entries[0].key.clone();
+                let absent_key = test_flow_key(4, 30, 3, 2);
+                for (action, file, root, index, shape) in actions {
+                    let key = test_flow_key(file, root, index, shape);
+                    let entry = Entry {
+                        key: key.clone(),
+                        type_: EntryKind::OriginalDeclaration,
+                        modifies_ancestors: true,
+                        deleted: false,
+                        widens: false,
+                    };
+                    match action {
+                        0 => frame.overwrite_entry(&project.db, entry),
+                        1 => frame.entries.push(entry),
+                        2 => {
+                            let taken = frame.take();
+                            prop_assert!(frame.entries.is_empty());
+                            frame = taken;
+                        }
+                        _ => frame = frame.clone(),
+                    }
+                    for query in [&key, &first_key, &absent_key] {
+                        let expected = frame
+                            .entries
+                            .iter()
+                            .position(|entry| entry.key.equals(&project.db, query));
+                        prop_assert_eq!(
+                            indexed_entry_position(&frame, &project.db, query),
+                            expected
+                        );
+                    }
+                }
                 Ok(())
             })
             .unwrap();
