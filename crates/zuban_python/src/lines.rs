@@ -71,7 +71,8 @@ impl NewlineIndices {
         inserted_len: usize,
     ) -> Option<Self> {
         let mut lines = self.lines(old_code).to_vec();
-        for offset in lines.iter_mut().filter(|offset| **offset as usize > end) {
+        let first_shifted = lines.partition_point(|offset| *offset as usize <= end);
+        for offset in &mut lines[first_shifted..] {
             let shifted = (*offset as usize)
                 .checked_sub(removed_len)?
                 .checked_add(inserted_len)?;
@@ -370,6 +371,24 @@ impl<'code> PositionInfos<'code> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_document_shifted_indices_match_fresh_scan() {
+        let code = "x = 1\n".repeat(16_000);
+        let indices = NewlineIndices::new();
+        for start in [0, code.len() / 2, code.len() - 2] {
+            let end = start + 1;
+            let replacement = "yy";
+            let updated = format!("{}{}{}", &code[..start], replacement, &code[end..]);
+            let shifted = indices
+                .shifted_after_edit(&code, end, end - start, replacement.len())
+                .unwrap();
+            assert_eq!(
+                shifted.lines(&updated),
+                NewlineIndices::new().lines(&updated)
+            );
+        }
+    }
 
     #[test]
     fn sparse_and_dense_newline_scans_agree() {
