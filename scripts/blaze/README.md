@@ -121,6 +121,24 @@ This measures one small compiled edit in an already built program; it does not
 establish first-build throughput, broad edit speedups, or sandbox alpha latency.
 The normal Cargo format/check/test gates remain authoritative.
 
+The second Blaze warm run's worker log resolves 211 crates in 32.2 seconds,
+checks 144 files in 47.6 seconds, then spends 217.1 seconds compiling 10,477
+functions for the first patch-ready base and 2.4 seconds linking it. Workspace
+load takes another 10.2 seconds. The full warm command takes 318.860 seconds;
+the first patch-ready compilation, not daemon launch alone, is its largest cost.
+The first run takes 275.424 seconds for the corresponding warm command.
+
+For these two runs, the extra warm cost over Cargo is about 274-295 seconds.
+The observed edit plus revert saves about 34-37 seconds per pair, so roughly
+eight such pairs would amortize one daemon restart if later pairs kept the same
+timings. This is arithmetic from two pairs, not a measured long-session result.
+Keeping the daemon alive during an active editing session avoids repeatedly
+paying the warm cost, at the expense of its memory use. Stop it when the session
+ends. Windows currently has no `Client::nobody()` background build, but moving
+the first patch-ready compilation into the background would hide rather than
+remove this cost. A real startup improvement needs that base to be reused or
+far fewer functions to be recompiled safely after a restart.
+
 The follow-up patch addresses mutable coercion casts, promotion of immutable
 constructor values inside macro-generated blocks, and declared return-type bounds
 around nested opaque iterators. Hidden opaque types remain obligations rather
