@@ -275,6 +275,14 @@ impl Project {
         self.db.delete_directory_of_in_memory_files(path)
     }
 
+    /// Discard fixture files in a directory known to have no disk backing.
+    pub fn discard_directory_of_in_memory_files(
+        &mut self,
+        path: &PathWithScheme,
+    ) -> Result<(), String> {
+        self.db.discard_directory_of_in_memory_files(path)
+    }
+
     pub fn close_in_memory_file(&mut self, path: &PathWithScheme) -> Result<(), &'static str> {
         self.db.close_in_memory_file(path)
     }

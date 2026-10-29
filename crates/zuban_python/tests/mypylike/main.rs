@@ -839,13 +839,19 @@ impl TestCase<'_, '_> {
         let cleanup_start = profile.then(Instant::now);
         // The fixture paths are fixed across checker modes and run causes. Keep the same
         // directory cleanup so namespace packages cannot leak into the next case.
-        if *FIXTURE_ROOT_HAS_DISK_BACKING.get_or_init(|| Path::new(BASE_PATH_STR).exists()) {
+        let has_disk_backing =
+            *FIXTURE_ROOT_HAS_DISK_BACKING.get_or_init(|| Path::new(BASE_PATH_STR).exists());
+        if has_disk_backing {
             project.close_in_memory_files(&fixture_data.flat_files);
         } else {
             project.discard_in_memory_files(&fixture_data.flat_files);
         }
         for directory in &fixture_data.directories {
-            let _ = project.delete_directory_of_in_memory_files(directory);
+            let _ = if has_disk_backing {
+                project.delete_directory_of_in_memory_files(directory)
+            } else {
+                project.discard_directory_of_in_memory_files(directory)
+            };
         }
         if let Some(start) = cleanup_start {
             PHASE_TIMINGS.with_borrow_mut(|times| times.cleanup += start.elapsed());

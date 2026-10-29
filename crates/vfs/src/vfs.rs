@@ -703,6 +703,7 @@ impl<F: VfsFile> Vfs<F> {
         &mut self,
         case_sensitive: bool,
         dir_path: &PathWithScheme,
+        discard_without_disk_read: bool,
         to_file: impl Fn(&FileState<F>, FileIndex, Box<str>) -> F,
     ) -> Result<InvalidationResult, String> {
         // TODO this method feels weird and currently only used in tests
@@ -721,9 +722,12 @@ impl<F: VfsFile> Vfs<F> {
             .collect();
         let mut invalidation_result = InvalidationResult::InvalidatedFiles;
         for path in in_mem_paths {
-            invalidation_result |= self
-                .close_in_memory_file(case_sensitive, &path, &to_file)
-                .unwrap();
+            invalidation_result |= if discard_without_disk_read {
+                self.discard_in_memory_file(case_sensitive, &path).unwrap()
+            } else {
+                self.close_in_memory_file(case_sensitive, &path, &to_file)
+                    .unwrap()
+            };
         }
         self.workspaces
             .delete_directory(&*self.handler, case_sensitive, dir_path)?;

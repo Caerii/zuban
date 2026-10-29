@@ -1929,9 +1929,26 @@ impl Database {
         &mut self,
         dir_path: &PathWithScheme,
     ) -> Result<(), String> {
+        self.delete_directory_of_in_memory_files_with_backing_policy(dir_path, false)
+    }
+
+    /// Discard fixture files in a directory known to have no disk backing.
+    pub fn discard_directory_of_in_memory_files(
+        &mut self,
+        dir_path: &PathWithScheme,
+    ) -> Result<(), String> {
+        self.delete_directory_of_in_memory_files_with_backing_policy(dir_path, true)
+    }
+
+    fn delete_directory_of_in_memory_files_with_backing_policy(
+        &mut self,
+        dir_path: &PathWithScheme,
+        discard_without_disk_read: bool,
+    ) -> Result<(), String> {
         let invalidation = self.vfs.delete_in_memory_files_directory(
             self.project.flags.case_sensitive,
             dir_path,
+            discard_without_disk_read,
             |file_state, file_index, new_code| {
                 PythonFile::from_file_entry_and_code(
                     &self.project,
