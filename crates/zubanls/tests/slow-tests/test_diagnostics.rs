@@ -469,6 +469,10 @@ fn check_panic_recovery_without_push() {
     assert_eq!(req("bar.py"), vec![r#""str" not callable"#]);
     assert_eq!(req("in_mem.py"), vec![r#""int" not callable"#]);
 
+    // The hook must still notify the client after another recovered panic.
+    server.raise_and_recover_panic_in_language_server();
+    assert_eq!(req("in_mem.py"), vec![r#""int" not callable"#]);
+
     // Check that in memory files can be changed after a panic
     server.change_in_memory_file("in_mem.py", "");
     assert!(server.diagnostics_for_file("in_mem.py").is_empty());
