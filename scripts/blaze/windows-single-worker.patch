@@ -1,0 +1,1778 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 0b27f80..9014816 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -770,6 +770,7 @@ dependencies = [
+  "serde_json",
+  "sha2 0.10.9",
+  "shlex",
++ "stdx",
+  "syntax",
+  "tar",
+  "tempfile",
+diff --git a/crates/blaze-cargo/Cargo.toml b/crates/blaze-cargo/Cargo.toml
+index efeb8d1..81fada2 100644
+--- a/crates/blaze-cargo/Cargo.toml
++++ b/crates/blaze-cargo/Cargo.toml
+@@ -30,6 +30,7 @@ anyhow.workspace = true
+ serde.workspace = true
+ serde_derive.workspace = true
+ serde_json.workspace = true
++stdx.workspace = true
+ tracing.workspace = true
+ cfg.workspace = true
+ cargo-platform = "0.3.3"
+diff --git a/crates/blaze-cargo/src/cargo/cli.rs b/crates/blaze-cargo/src/cargo/cli.rs
+index a1de9d1..7c955f4 100644
+--- a/crates/blaze-cargo/src/cargo/cli.rs
++++ b/crates/blaze-cargo/src/cargo/cli.rs
+@@ -72,6 +72,7 @@ const SHOWING: &[&str] = &["-v", "-vv", "--verbose", "-q", "--quiet", "--color"]
+ /// or by what the name starts with. Their values are part of which build this is.
+ const BUILD_ENV: &[&str] = &[
+     "RUSTFLAGS",
++    "RUST_MIN_STACK",
+     "RUSTC",
+     "RUSTC_WRAPPER",
+     "RUSTUP_TOOLCHAIN",
+@@ -81,6 +82,7 @@ const BUILD_ENV: &[&str] = &[
+     "CARGO_PROFILE_",
+     "CARGO_INCREMENTAL",
+     "BLAZE_BACKEND",
++    "BLAZE_ASSEMBLER",
+     "BLAZE_OPT",
+     "BLAZE_MIR_OPT",
+     "BLAZE_EMIT",
+@@ -88,6 +90,7 @@ const BUILD_ENV: &[&str] = &[
+     "BLAZE_BUILT_IN",
+     "BLAZE_LLVM_INLINE_THRESHOLD",
+     super::own_macro::SERVER,
++    "BLAZE_NATIVE_PROC_MACRO_SERVER",
+     super::own_macro::WASM,
+ ];
+ 
+@@ -96,6 +99,7 @@ const BUILD_ENV: &[&str] = &[
+ /// left out reaches a worker only from whoever started the daemon.
+ const WORKER_ENV: &[&str] = &[
+     "RUSTFLAGS",
++    "RUST_MIN_STACK",
+     "CARGO_ENCODED_RUSTFLAGS",
+     "RUSTDOCFLAGS",
+     "CARGO_ENCODED_RUSTDOCFLAGS",
+@@ -106,6 +110,7 @@ const WORKER_ENV: &[&str] = &[
+     "CARGO_HOME",
+     "PATH",
+     "BLAZE_BACKEND",
++    "BLAZE_ASSEMBLER",
+     "BLAZE_OPT",
+     "BLAZE_MIR_OPT",
+     "BLAZE_EMIT",
+@@ -113,6 +118,7 @@ const WORKER_ENV: &[&str] = &[
+     "BLAZE_BUILT_IN",
+     "BLAZE_LLVM_INLINE_THRESHOLD",
+     super::own_macro::SERVER,
++    "BLAZE_NATIVE_PROC_MACRO_SERVER",
+     super::own_macro::WASM,
+     super::layout::NEW_LAYOUT,
+ ];
+@@ -126,12 +132,15 @@ const WORKER_ENV: &[&str] = &[
+ /// layout the user's cargo chose.
+ const WORKER_ENV_EXACT: &[&str] = &[
+     "RUSTFLAGS",
++    "RUST_MIN_STACK",
+     "CARGO_ENCODED_RUSTFLAGS",
+     "RUSTDOCFLAGS",
+     "CARGO_ENCODED_RUSTDOCFLAGS",
+     "CARGO_BUILD_",
+     "CARGO_PROFILE_",
++    "BLAZE_ASSEMBLER",
+     super::own_macro::SERVER,
++    "BLAZE_NATIVE_PROC_MACRO_SERVER",
+     super::own_macro::WASM,
+     super::layout::NEW_LAYOUT,
+ ];
+@@ -558,6 +567,15 @@ mod tests {
+     fn flags_are_the_builds() {
+         let exact = |name| is_named(WORKER_ENV_EXACT, name) || target_rustflags(name);
+         assert!(exact("RUSTFLAGS") && exact("CARGO_ENCODED_RUSTDOCFLAGS"));
++        assert!(exact("BLAZE_NATIVE_PROC_MACRO_SERVER"));
++        assert!(exact("BLAZE_ASSEMBLER"));
++        assert!(exact("RUST_MIN_STACK"));
++        assert!(is_named(BUILD_ENV, "RUST_MIN_STACK"));
++        assert!(worker_named("RUST_MIN_STACK"));
++        assert!(is_named(BUILD_ENV, "BLAZE_NATIVE_PROC_MACRO_SERVER"));
++        assert!(worker_named("BLAZE_NATIVE_PROC_MACRO_SERVER"));
++        assert!(is_named(BUILD_ENV, "BLAZE_ASSEMBLER"));
++        assert!(worker_named("BLAZE_ASSEMBLER"));
+         assert!(exact("CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS") && exact("CARGO_BUILD_RUSTFLAGS"));
+         assert!(exact("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"));
+         assert!(!exact("CARGO_TARGET_DIR") && !exact("PATH") && !exact("RUSTUP_TOOLCHAIN"));
+diff --git a/crates/blaze-cargo/src/cargo/closure/kept.rs b/crates/blaze-cargo/src/cargo/closure/kept.rs
+index 2e9c7f7..2a41763 100644
+--- a/crates/blaze-cargo/src/cargo/closure/kept.rs
++++ b/crates/blaze-cargo/src/cargo/closure/kept.rs
+@@ -336,7 +336,7 @@ fn lay_out(store: &Store, manifest: &Manifest, root: &Path) -> anyhow::Result<()
+         [] => root.to_owned(),
+         path => root.join(std::ffi::OsStr::from_bytes(path)),
+     };
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++    let threads = crate::process::compute_workers();
+     let mut directories = Vec::new();
+     let mut batch: Vec<&Entry> = Vec::new();
+     let mut batched = 0;
+diff --git a/crates/blaze-cargo/src/cargo/compile_time.rs b/crates/blaze-cargo/src/cargo/compile_time.rs
+index 434bdbd..4d9be38 100644
+--- a/crates/blaze-cargo/src/cargo/compile_time.rs
++++ b/crates/blaze-cargo/src/cargo/compile_time.rs
+@@ -256,7 +256,7 @@ impl<'a> Driver<'a> {
+             rustc_workspace_wrapper: None,
+             linker: None,
+         };
+-        let jobs = std::thread::available_parallelism().map_or(1, |it| it.get());
++        let jobs = crate::process::compute_workers();
+         Ok(Driver {
+             cargo,
+             graph,
+@@ -390,8 +390,8 @@ impl<'a> Driver<'a> {
+         let ready = (0..tasks.len()).filter(|&it| waiting[it] == 0).collect();
+         let state = Mutex::new(State { ready, waiting, busy: 0, done: 0, failed: None });
+         let wake = Condvar::new();
+-        let workers =
+-            std::thread::available_parallelism().map_or(1, |it| it.get()).div_ceil(4).max(4);
++        let available = crate::process::compute_workers();
++        let workers = available.div_ceil(4).max(4).min(available);
+         let slots = workers.min(tasks.len().max(1));
+         let counting = crate::events::Counting::new(
+             blaze_protocol::events::Step::BuildScripts,
+diff --git a/crates/blaze-cargo/src/process.rs b/crates/blaze-cargo/src/process.rs
+index b3c1b8f..0fbea73 100644
+--- a/crates/blaze-cargo/src/process.rs
++++ b/crates/blaze-cargo/src/process.rs
+@@ -6,6 +6,7 @@ use ide_db::{
+     RootDatabase,
+     base_db::{Crate, Env, ProcessEnv, process_env_var, set_process_env},
+ };
++pub use stdx::thread::compute_workers;
+ 
+ /// Between two variables on the line of a request.
+ const BETWEEN: char = '\u{1f}';
+diff --git a/crates/blaze-engine/build.rs b/crates/blaze-engine/build.rs
+index 9828b49..6117868 100644
+--- a/crates/blaze-engine/build.rs
++++ b/crates/blaze-engine/build.rs
+@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
+ 
+ fn main() {
+     println!("cargo:rerun-if-changed=build.rs");
++    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
++        // The engine is also the worker; deep crate graphs need more than the default PE stack.
++        println!("cargo:rustc-link-arg-bin=blaze-engine=/STACK:16777216");
++    }
+     version();
+     println!("cargo:rerun-if-env-changed=CARGO_WORKSPACE_DIR");
+     let Some(root) = std::env::var_os("CARGO_WORKSPACE_DIR").map(PathBuf::from) else { return };
+diff --git a/crates/blaze-engine/src/borrowck.rs b/crates/blaze-engine/src/borrowck.rs
+index 22d487a..a703ebb 100644
+--- a/crates/blaze-engine/src/borrowck.rs
++++ b/crates/blaze-engine/src/borrowck.rs
+@@ -198,7 +198,7 @@ fn check_project(project: &str) -> anyhow::Result<()> {
+         load_out_dirs_from_check: true,
+         with_proc_macro_server: ProcMacroServerChoice::Sysroot,
+         prefill_caches: false,
+-        num_worker_threads: std::thread::available_parallelism().map_or(1, |it| it.get()),
++        num_worker_threads: blaze_cargo::process::compute_workers(),
+         proc_macro_processes: 1,
+     };
+     let started = Instant::now();
+diff --git a/crates/blaze-engine/src/check.rs b/crates/blaze-engine/src/check.rs
+index 5a29af5..e4f4142 100644
+--- a/crates/blaze-engine/src/check.rs
++++ b/crates/blaze-engine/src/check.rs
+@@ -34,7 +34,7 @@ pub(crate) fn serve(args: Args) -> anyhow::Result<()> {
+     let projects = [args.project.as_path()];
+     let selection = args.selection.clone();
+     let (mut db, vfs, checkouts) =
+-        crate::load(&projects, &cargo_config, crate::load_config(), selection, None, None)?;
++        crate::load(&projects, &cargo_config, crate::load_config()?, selection, None, None)?;
+     ide_db::base_db::set_process_env(&mut db, crate::process::own());
+     crate::prepare_macro_sessions(&db);
+     let Parts { root, members, lints_capped, .. } = checkouts.parts(&args.project)?;
+@@ -93,7 +93,7 @@ pub(crate) fn once(project: &Path, krate: &str) -> anyhow::Result<Option<crate::
+     let (mut db, vfs, checkouts) = crate::load(
+         &projects,
+         &cargo_config,
+-        crate::load_config(),
++        crate::load_config()?,
+         args.selection.clone(),
+         None,
+         None,
+diff --git a/crates/blaze-engine/src/doc.rs b/crates/blaze-engine/src/doc.rs
+index 2321104..86f19d0 100644
+--- a/crates/blaze-engine/src/doc.rs
++++ b/crates/blaze-engine/src/doc.rs
+@@ -204,7 +204,7 @@ pub(crate) fn command(args: &[String]) -> anyhow::Result<i32> {
+     let (mut db, vfs, _checkouts) = crate::load(
+         &[project.as_path()],
+         &cargo_config,
+-        crate::load_config(),
++        crate::load_config()?,
+         selection.clone(),
+         None,
+         None,
+diff --git a/crates/blaze-engine/src/doctest.rs b/crates/blaze-engine/src/doctest.rs
+index ff45421..e1a5141 100644
+--- a/crates/blaze-engine/src/doctest.rs
++++ b/crates/blaze-engine/src/doctest.rs
+@@ -1302,7 +1302,7 @@ fn run(
+             .collect(),
+         None => Vec::new(),
+     };
+-    let compilers = (cores / 16).clamp(1, 4).min(ours.len());
++    let compilers = (blaze_cargo::process::compute_workers() / 16).clamp(1, 4).min(ours.len());
+     let ours = Mutex::new(ours.into_iter());
+     let compiling = Instant::now();
+     std::thread::scope(|scope| {
+diff --git a/crates/blaze-engine/src/frozen.rs b/crates/blaze-engine/src/frozen.rs
+index e0292ab..0953313 100644
+--- a/crates/blaze-engine/src/frozen.rs
++++ b/crates/blaze-engine/src/frozen.rs
+@@ -304,7 +304,7 @@ pub(crate) fn store(db: &ide_db::RootDatabase, served: &Served) -> anyhow::Resul
+     // On every core: a cold build has a thousand to write, and waits for them.
+     let (stored, refused) = (AtomicUsize::new(0), Mutex::new(FxHashMap::default()));
+     let next = AtomicUsize::new(0);
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++    let threads = blaze_cargo::process::compute_workers();
+     std::thread::scope(|scope| {
+         for _ in 0..threads.min(unstored.len()) {
+             let (db, unstored, next) = (db.clone(), &unstored, &next);
+diff --git a/crates/blaze-engine/src/lib.rs b/crates/blaze-engine/src/lib.rs
+index eaa4d73..e434054 100644
+--- a/crates/blaze-engine/src/lib.rs
++++ b/crates/blaze-engine/src/lib.rs
+@@ -1472,7 +1472,7 @@ fn library_in(dir: &Path) -> Vec<PathBuf> {
+ 
+ impl SymbolResolver for Resolver<'_> {
+     fn in_parallel_beside(&self, count: usize, work: &ParallelWork<'_>, beside: &mut dyn FnMut()) {
+-        let threads = std::thread::available_parallelism().map_or(1, |it| it.get()).min(count);
++        let threads = process::compute_workers().min(count);
+         // One alone is as soon done by whoever asks for what it computes.
+         if threads < 2 {
+             return beside();
+@@ -3580,17 +3580,20 @@ fn built_crates(db: &RootDatabase, args: &Args) -> anyhow::Result<Vec<ide_db::ba
+ /// asks first otherwise reads every file that changed on one.
+ fn resolve_names(db: &RootDatabase, crates: &[ide_db::base_db::Crate]) {
+     let next = std::sync::atomic::AtomicUsize::new(0);
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++    let threads = process::compute_workers();
++    let work = |db: RootDatabase| {
++        while let Some(&krate) = crates.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
++        {
++            hir::attach_db(&db, || _ = hir::crate_def_map(&db, krate));
++        }
++    };
++    if threads.min(crates.len()) == 1 {
++        return work(db.clone());
++    }
+     std::thread::scope(|scope| {
+         for _ in 0..threads.min(crates.len()) {
+-            let (db, next) = (db.clone(), &next);
+-            scope.spawn(move || {
+-                while let Some(&krate) =
+-                    crates.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+-                {
+-                    hir::attach_db(&db, || _ = hir::crate_def_map(&db, krate));
+-                }
+-            });
++            let (db, work) = (db.clone(), &work);
++            scope.spawn(move || work(db));
+         }
+     });
+ }
+@@ -3613,57 +3616,59 @@ fn resolve_all(db: &RootDatabase, crates: &[ide_db::base_db::Crate], threads: us
+     let next = std::sync::atomic::AtomicUsize::new(0);
+     let helping = std::sync::atomic::AtomicUsize::new(0);
+     let counting = events::Counting::new(events::Step::Resolve, crates.len(), threads);
+-    std::thread::scope(|scope| {
+-        for slot in 0..threads {
+-            let db = db.clone();
+-            let (next, helping, counting) = (&next, &helping, &counting);
+-            scope.spawn(move || {
+-                while let Some(&krate) =
+-                    crates.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+-                {
+-                    let start = Instant::now();
+-                    let before = memory::live();
+-                    counting.on(slot, || crate_shown(&db, krate));
+-                    events::crate_is(krate, events::CrateState::Resolving);
+-                    hir::attach_db(&db, || {
+-                        _ = hir::crate_def_map(&db, krate);
+-                        let names = start.elapsed();
+-                        let frozen = hir_ty::method_resolution::frozen::served(&db, krate);
+-                        if !frozen {
+-                            warm_impls(&db, krate, helping, threads);
+-                        }
+-                        _ = hir::TraitImpls::for_crate(&db, krate);
+-                        // Which of its dependencies the crate names is read off its files,
+-                        // and the first body inferred would wait for that of every crate.
+-                        _ = hir::TraitImpls::for_crate_and_deps(&db, krate);
+-                        if frozen {
+-                            warm_files(&db, krate, helping, threads);
+-                        } else if krate.data(&db).origin.is_lang() {
+-                            // A build asks which functions written in the bodies of the
+-                            // standard library share a path, which every body of the crate is
+-                            // lowered for: threads are idle here, waiting for the crates that
+-                            // come next.
+-                            _ = declared_in(&db, krate.into());
+-                        }
+-                        if std::env::var_os("BLAZE_STATS").is_some() {
+-                            let name = krate.extra_data(&db).display_name.as_ref();
+-                            let name = name.map(|it| it.to_string()).unwrap_or_default();
+-                            // What the heap grew by is this crate's when one thread resolves.
+-                            let grew = memory::live().zip(before).map(|(now, before)| {
+-                                let origin = &krate.data(&db).origin;
+-                                format!(", {:+} bytes {origin:?}", now as i64 - before as i64)
+-                            });
+-                            eprintln!(
+-                                "resolved {name}: names {names:.1?}, impls {:.1?}{}",
+-                                start.elapsed() - names,
+-                                grew.unwrap_or_default()
+-                            );
+-                        }
++    let work = |slot, db: RootDatabase| {
++        while let Some(&krate) = crates.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
++        {
++            let start = Instant::now();
++            let before = memory::live();
++            counting.on(slot, || crate_shown(&db, krate));
++            events::crate_is(krate, events::CrateState::Resolving);
++            hir::attach_db(&db, || {
++                _ = hir::crate_def_map(&db, krate);
++                let names = start.elapsed();
++                let frozen = hir_ty::method_resolution::frozen::served(&db, krate);
++                if !frozen {
++                    warm_impls(&db, krate, &helping, threads);
++                }
++                _ = hir::TraitImpls::for_crate(&db, krate);
++                // Which of its dependencies the crate names is read off its files,
++                // and the first body inferred would wait for that of every crate.
++                _ = hir::TraitImpls::for_crate_and_deps(&db, krate);
++                if frozen {
++                    warm_files(&db, krate, &helping, threads);
++                } else if krate.data(&db).origin.is_lang() {
++                    // A build asks which functions written in the bodies of the
++                    // standard library share a path, which every body of the crate is
++                    // lowered for: threads are idle here, waiting for the crates that
++                    // come next.
++                    _ = declared_in(&db, krate.into());
++                }
++                if std::env::var_os("BLAZE_STATS").is_some() {
++                    let name = krate.extra_data(&db).display_name.as_ref();
++                    let name = name.map(|it| it.to_string()).unwrap_or_default();
++                    // What the heap grew by is this crate's when one thread resolves.
++                    let grew = memory::live().zip(before).map(|(now, before)| {
++                        let origin = &krate.data(&db).origin;
++                        format!(", {:+} bytes {origin:?}", now as i64 - before as i64)
+                     });
+-                    events::crate_is(krate, events::CrateState::Resolved);
+-                    counting.done(slot);
++                    eprintln!(
++                        "resolved {name}: names {names:.1?}, impls {:.1?}{}",
++                        start.elapsed() - names,
++                        grew.unwrap_or_default()
++                    );
+                 }
+             });
++            events::crate_is(krate, events::CrateState::Resolved);
++            counting.done(slot);
++        }
++    };
++    if threads == 1 {
++        return work(0, db.clone());
++    }
++    std::thread::scope(|scope| {
++        for slot in 0..threads {
++            let (db, work) = (db.clone(), &work);
++            scope.spawn(move || work(slot, db));
+         }
+     });
+ }
+@@ -3703,9 +3708,20 @@ fn verify_impls<'scope>(
+     crates: &FxHashSet<ide_db::base_db::Crate>,
+ ) {
+     use hir_ty::method_resolution::{InherentImpls, TraitImpls};
++    let threads = process::compute_workers();
++    if threads == 1 {
++        _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            hir::attach_db(db, || {
++                for &krate in crates {
++                    _ = TraitImpls::for_crate(db, krate);
++                    _ = InherentImpls::for_crate(db, krate);
++                }
++            })
++        }));
++        return;
++    }
+     let crates: Arc<[ide_db::base_db::Crate]> = crates.iter().copied().collect();
+     let next = Arc::new(AtomicUsize::new(0));
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
+     for _ in 0..threads.min(crates.len()) {
+         let (db, crates, next) = (db.clone(), crates.clone(), next.clone());
+         scope.spawn(move || {
+@@ -4162,7 +4178,7 @@ fn exported(db: &RootDatabase, functions: &[FunctionId]) -> Vec<bool> {
+         };
+         functions.iter().map(exported).collect()
+     };
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++    let threads = process::compute_workers();
+     let each = functions.len().div_ceil(threads).max(256);
+     if functions.len() <= each {
+         return exported(db, functions);
+@@ -4221,7 +4237,7 @@ impl Listed {
+             return;
+         }
+         let crates = &unlisted[..];
+-        let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++        let threads = process::compute_workers();
+         let next = std::sync::atomic::AtomicUsize::new(0);
+         std::thread::scope(|scope| {
+             let parts: Vec<_> = (0..threads.min(crates.len()))
+@@ -4618,9 +4634,7 @@ fn lower(db: &RootDatabase, bodies: Vec<DefWithBodyId>) -> Vec<DefWithBodyId> {
+     // A thread costs about what lowering a few small bodies does: the bodies of one edited
+     // file are lowered where they are asked for.
+     const PER_THREAD: usize = 16;
+-    let threads = std::thread::available_parallelism()
+-        .map_or(1, |it| it.get())
+-        .min(bodies.len().div_ceil(PER_THREAD));
++    let threads = process::compute_workers().min(bodies.len().div_ceil(PER_THREAD));
+     if threads <= 1 {
+         hir::attach_db(db, || {
+             for &body in &bodies {
+@@ -4828,7 +4842,9 @@ fn std_unit_at(
+         hasher.update((bytes.len() as u64).to_le_bytes());
+         hasher.update(bytes);
+     };
+-    field(b"blaze standard library 5");
++    field(b"blaze standard library 6");
++    let target = hir_ty_codegen::Target::selected().map_err(anyhow::Error::msg)?;
++    field(&hir_ty_codegen::assembler_cache_key(target.triple()).map_err(anyhow::Error::msg)?);
+     field(format!("{:?} {debug:?}", args.selection.target).as_bytes());
+     // A file of one of its crates whose text is blaze's, not the toolchain's.
+     if args.run_tool {
+@@ -5305,7 +5321,7 @@ fn build(
+             }),
+         );
+     }
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++    let threads = process::compute_workers();
+     // What every question about a crate's code comes down to first, asked one crate to a
+     // thread: left to the questions, whichever gets there has the others wait for all of it.
+     let next = std::sync::atomic::AtomicUsize::new(0);
+@@ -6448,7 +6464,7 @@ fn broken_in(
+     within: Option<Arc<FxHashSet<ide_db::base_db::Crate>>>,
+     lints: bool,
+ ) -> Option<errors::Said> {
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++    let threads = process::compute_workers();
+     let config = ide_diagnostics::DiagnosticsConfig::test_sample();
+     let refuse_borrowck = std::env::var_os("BLAZE_BORROWCK_REFUSE").is_none_or(|it| it != "0");
+     // The check of one file is an edit's, over before anyone would look.
+@@ -8130,7 +8146,7 @@ fn lower_until(
+ }
+ 
+ fn cores() -> usize {
+-    std::thread::available_parallelism().map_or(1, |it| it.get())
++    process::compute_workers()
+ }
+ 
+ /// The threads that work beside a build of cargo's: a quarter of the cores, the rest being
+@@ -8229,7 +8245,7 @@ fn compile_time_deps(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+     let args = Args::parse(args.chain(fixed))?;
+     let config = cargo_config(&args);
+     let (workspace, _) =
+-        workspace_at(&args.project, &config, &load_config(), &args.selection, None, None)?;
++        workspace_at(&args.project, &config, &load_config()?, &args.selection, None, None)?;
+     let ProjectWorkspaceKind::Cargo { cargo, build_scripts, .. } = &workspace.kind else {
+         bail!("{} is not a cargo workspace", args.project.display());
+     };
+@@ -8254,14 +8270,33 @@ fn compile_time_deps(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+     Ok(())
+ }
+ 
+-fn load_config() -> LoadCargoConfig {
+-    LoadCargoConfig {
++fn load_config() -> anyhow::Result<LoadCargoConfig> {
++    let with_proc_macro_server = match std::env::var_os("BLAZE_NATIVE_PROC_MACRO_SERVER") {
++        None => ProcMacroServerChoice::Sysroot,
++        Some(path) => {
++            if !cargo::own_macro::turned_off() {
++                bail!("BLAZE_NATIVE_PROC_MACRO_SERVER requires BLAZE_PROC_MACRO_SERVER=0");
++            }
++            let path = PathBuf::from(path);
++            if !path.is_absolute() || !path.is_file() {
++                bail!(
++                    "BLAZE_NATIVE_PROC_MACRO_SERVER must name an existing absolute file: {}",
++                    path.display()
++                );
++            }
++            let path = path.to_str().context("BLAZE_NATIVE_PROC_MACRO_SERVER must be UTF-8")?;
++            ProcMacroServerChoice::Explicit(AbsPathBuf::try_from(path).map_err(|_| {
++                anyhow::anyhow!("BLAZE_NATIVE_PROC_MACRO_SERVER must be an absolute path")
++            })?)
++        }
++    };
++    Ok(LoadCargoConfig {
+         load_out_dirs_from_check: true,
+-        with_proc_macro_server: ProcMacroServerChoice::Sysroot,
++        with_proc_macro_server,
+         prefill_caches: false,
+         num_worker_threads: 1,
+         proc_macro_processes: 1,
+-    }
++    })
+ }
+ 
+ /// What a process loaded before it was told its build: a package of nothing, and with it the
+@@ -8288,10 +8323,10 @@ impl Held {
+         held_wide();
+         // An empty package has no build script, and asking cargo for one waits for the lock
+         // of the target directory, which a build that started beside this holds until it ends.
+-        let scriptless = LoadCargoConfig { load_out_dirs_from_check: false, ..load_config() };
++        let scriptless = LoadCargoConfig { load_out_dirs_from_check: false, ..load_config()? };
+         let (db, vfs, mut checkouts) =
+             load(&[dir], &cargo_config(&args), scriptless, args.selection, None, None)?;
+-        checkouts.load_config = load_config();
++        checkouts.load_config = load_config()?;
+         let all: Vec<ide_db::base_db::Crate> =
+             Crate::all(&db).into_iter().map(Into::into).collect();
+         // The spare starts with the daemon, which the first build starts as cargo does.
+@@ -8308,8 +8343,13 @@ impl Held {
+         projects: &[&Path],
+         cargo_config: &CargoConfig,
+         selection: &plan::Selection,
++        proc_macro_server: &ProcMacroServerChoice,
+     ) -> Option<Held> {
+         let start = Instant::now();
++        if &self.checkouts.load_config.with_proc_macro_server != proc_macro_server {
++            eprintln!("spare: not used: its proc-macro server differs from the build's");
++            return None;
++        }
+         // The toolchain of the build is asked for before its workspace is loaded for nothing.
+         let held = self.checkouts.loaded.workspaces().first()?.sysroot.root()?.to_owned();
+         let asked = match &cargo_config.sysroot {
+@@ -8861,16 +8901,17 @@ fn run_holding(
+         _ => None,
+     };
+     let read_from = SystemTime::now();
++    let load_config = load_config()?;
+     let held = held.and_then(|mut held| {
+         held.checkouts.beside = said.as_ref().map(beside);
+         held.checkouts.scripts_said = scripts_said.clone();
+-        held.with(&projects, &cargo_config, &selection)
++        held.with(&projects, &cargo_config, &selection, &load_config.with_proc_macro_server)
+     });
+     let (mut db, mut vfs, mut checkouts) = match held {
+         Some(Held { db, vfs, checkouts }) => (db, vfs, checkouts),
+         None => {
+             let beside = said.as_ref().map(beside);
+-            load(&projects, &cargo_config, load_config(), selection, beside, scripts_said)?
++            load(&projects, &cargo_config, load_config, selection, beside, scripts_said)?
+         }
+     };
+     let loaded_at = start.elapsed();
+@@ -11036,6 +11077,17 @@ impl Program {
+             if let Some(crates) = &within {
+                 verify_impls(scope, db, crates);
+             }
++            if process::compute_workers() == 1 {
++                let start = Instant::now();
++                let broken =
++                    broken_in(db, &edited, paths, &args.checkout, within, !args.lints_capped);
++                if std::env::var_os("BLAZE_STATS").is_some() {
++                    eprintln!("check-us: {}", start.elapsed().as_micros());
++                }
++                let hold =
++                    || unparsed(db, &edited, paths, &args.checkout).is_some() || broken.is_some();
++                return (build(db, table, args, known, listed, Some(&hold)), broken);
++            }
+             let check = {
+                 let (db, edited, root) = (db.clone(), &edited, &args.checkout);
+                 let lints = !args.lints_capped;
+diff --git a/crates/blaze-engine/src/mirdump.rs b/crates/blaze-engine/src/mirdump.rs
+index 6d5feff..19b457a 100644
+--- a/crates/blaze-engine/src/mirdump.rs
++++ b/crates/blaze-engine/src/mirdump.rs
+@@ -56,7 +56,7 @@ pub(crate) fn command(mut args: impl Iterator<Item = String>) -> anyhow::Result<
+     let (db, vfs, checkouts) = load(
+         &[Path::new(&project)],
+         &cargo_config(&args),
+-        load_config(),
++        load_config()?,
+         args.selection.clone(),
+         None,
+         None,
+diff --git a/crates/blaze-engine/src/outline.rs b/crates/blaze-engine/src/outline.rs
+index c58ad45..5272019 100644
+--- a/crates/blaze-engine/src/outline.rs
++++ b/crates/blaze-engine/src/outline.rs
+@@ -378,7 +378,7 @@ fn outlines(db: &RootDatabase, listed: &Listed, files: &[FileId]) -> Vec<Option<
+         }
+         return vec![outline];
+     }
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++    let threads = blaze_cargo::process::compute_workers();
+     let mut outlines = vec![None; files.len()];
+     std::thread::scope(|scope| {
+         let parts: Vec<_> = (0..threads.min(files.len()))
+diff --git a/crates/blaze-engine/src/symbols.rs b/crates/blaze-engine/src/symbols.rs
+index 402a567..25bfa81 100644
+--- a/crates/blaze-engine/src/symbols.rs
++++ b/crates/blaze-engine/src/symbols.rs
+@@ -184,7 +184,7 @@ pub(crate) fn read_ahead(file: PathBuf) {
+         std::sync::LazyLock::new(|| {
+             let (send, receive) = std::sync::mpsc::channel::<PathBuf>();
+             let receive = Arc::new(Mutex::new(receive));
+-            let cores = std::thread::available_parallelism().map_or(1, |it| it.get());
++            let cores = blaze_cargo::process::compute_workers();
+             for _ in 0..cores.div_ceil(4) {
+                 let receive = receive.clone();
+                 std::thread::spawn(move || {
+@@ -234,7 +234,7 @@ fn names_of(files: &[PathBuf]) -> Vec<anyhow::Result<Vec<Named>>> {
+             read.push((at, read_before(file).map_or_else(|| names_of_file(file), Ok)));
+         }
+     };
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get()).min(files.len());
++    let threads = blaze_cargo::process::compute_workers().min(files.len());
+     let mut read: Vec<_> = std::thread::scope(|scope| {
+         let threads: Vec<_> = (0..threads).map(|_| scope.spawn(read)).collect();
+         threads.into_iter().flat_map(|it| it.join().expect("reading symbols panicked")).collect()
+diff --git a/crates/blaze-engine/src/whole.rs b/crates/blaze-engine/src/whole.rs
+index 6c50a67..5765664 100644
+--- a/crates/blaze-engine/src/whole.rs
++++ b/crates/blaze-engine/src/whole.rs
+@@ -95,7 +95,7 @@ pub(crate) fn pack(path: &Path) -> std::io::Result<bool> {
+ /// The `len` bytes of the file at `path` as zstd frames of a [`PART`] each, which read back as
+ /// one: as many parts at once as there are cores, up to 16.
+ fn compress(path: &Path, len: u64, out: &mut File) -> std::io::Result<()> {
+-    let threads = std::thread::available_parallelism().map_or(1, |it| it.get()).min(16) as u64;
++    let threads = blaze_cargo::process::compute_workers().min(16) as u64;
+     let parts = len.div_ceil(PART as u64);
+     let mut first = 0;
+     while first < parts {
+diff --git a/crates/hir-ty-borrowck/src/regions.rs b/crates/hir-ty-borrowck/src/regions.rs
+index 6594e69..8b364bc 100644
+--- a/crates/hir-ty-borrowck/src/regions.rs
++++ b/crates/hir-ty-borrowck/src/regions.rs
+@@ -2709,6 +2709,24 @@ impl<'db> Builder<'_, '_, 'db> {
+             .map(|&it| self.regions.local_tys[it.into_raw().into_u32() as usize])
+             .collect();
+         let mut signature = signature;
++        // The written type around an opaque still supplies implied bounds. For example,
++        // `Wrapper<'a, 'b, impl Sized>` implies `'a: 'b` when Wrapper requires it. The
++        // return slot contains the hidden type, whose bounds must be proved instead, so
++        // use the declared type here and leave its opaque aliases unrevealed below.
++        if self.returns_opaque
++            && self.ctx.closure_local.is_none()
++            && let InferBodyId::DefWithBodyId(DefWithBodyId::FunctionId(function)) = self.body.owner
++        {
++            let declared = self
++                .ctx
++                .db
++                .callable_item_signature(CallableDefId::FunctionId(function))
++                .instantiate_identity()
++                .skip_norm_wip()
++                .skip_binder()
++                .output();
++            signature.push(self.signature_ty(declared));
++        }
+         signature.extend(self.impl_header_types());
+         let mut seen = FxHashSet::default();
+         for ty in signature {
+@@ -2892,7 +2910,11 @@ impl<'db> Builder<'_, '_, 'db> {
+             TyKind::Ref(region, inner, _) => {
+                 if let Some(shorter) = self.region_rv(region) {
+                     let referent = match inner.kind() {
+-                        TyKind::Alias(_) => self.normalize(inner).unwrap_or(inner),
++                        TyKind::Alias(alias)
++                            if !matches!(alias.kind, rustc_type_ir::AliasTyKind::Opaque { .. }) =>
++                        {
++                            self.normalize(inner).unwrap_or(inner)
++                        }
+                         _ => inner,
+                     };
+                     let (components, params) = self.implied_components(referent);
+@@ -2993,6 +3015,11 @@ impl<'db> Builder<'_, '_, 'db> {
+             // And the bounds of its trait, which its trait reference's well-formedness needs:
+             // `<T as Trait<A>>::Assoc` that `A: 'static` where `trait Trait<A: 'static>`.
+             TyKind::Alias(alias) => {
++                // An opaque's hidden type is not part of the written signature. Its
++                // well-formedness is an obligation, never an implied assumption.
++                if matches!(alias.kind, rustc_type_ir::AliasTyKind::Opaque { .. }) {
++                    return;
++                }
+                 if let rustc_type_ir::AliasTyKind::Projection { def_id } = alias.kind {
+                     for it in alias.args.types() {
+                         self.implied_bounds(it, pairs, seen, depth + 1, in_field);
+@@ -3071,8 +3098,14 @@ impl<'db> Builder<'_, '_, 'db> {
+         let mut params = Vec::new();
+         outlives_components(ty, &mut components, &mut params);
+         alias_components(ty, &mut params);
+-        let aliases: Vec<_> =
+-            params.iter().filter(|it| matches!(it.kind(), TyKind::Alias(_))).copied().collect();
++        let aliases: Vec<_> = params
++            .iter()
++            .filter(|it| {
++                matches!(it.kind(), TyKind::Alias(alias)
++                        if !matches!(alias.kind, rustc_type_ir::AliasTyKind::Opaque { .. }))
++            })
++            .copied()
++            .collect();
+         for alias in aliases {
+             if let Some(normalized) = self.normalize(alias)
+                 && normalized != alias
+diff --git a/crates/hir-ty-codegen/asm.rs b/crates/hir-ty-codegen/asm.rs
+index 44ed5d6..f3ac723 100644
+--- a/crates/hir-ty-codegen/asm.rs
++++ b/crates/hir-ty-codegen/asm.rs
+@@ -5,7 +5,7 @@
+ 
+ use std::{
+     fmt::Write,
+-    path::PathBuf,
++    path::{Path, PathBuf},
+     process::Command,
+     sync::{Arc, Mutex, OnceLock},
+ };
+@@ -1303,7 +1303,9 @@ impl Assembled {
+ pub(super) fn assemble(triple: &str, text: &str) -> Result<Arc<Assembled>, String> {
+     static ASSEMBLED: OnceLock<Mutex<FxHashMap<[u8; 32], Arc<Assembled>>>> = OnceLock::new();
+     let mut hasher = Sha256::new();
+-    hasher.update(b"blaze asm 3");
++    let assembler = selected_assembler(triple)?;
++    hasher.update(b"blaze asm 4");
++    hasher.update(assembler.key);
+     hasher.update(triple);
+     hasher.update([0]);
+     hasher.update(text);
+@@ -1320,7 +1322,7 @@ pub(super) fn assemble(triple: &str, text: &str) -> Result<Arc<Assembled>, Strin
+     let code = Arc::new(match kept {
+         Some(code) => code,
+         None => {
+-            let code = Assembler::selected().assemble(triple, text, &key)?;
++            let code = assembler.backend.assemble(triple, text, &key)?;
+             if let Some(store) = store {
+                 store.insert(&key, &code.to_bytes());
+             }
+@@ -1333,33 +1335,101 @@ pub(super) fn assemble(triple: &str, text: &str) -> Result<Arc<Assembled>, Strin
+ 
+ /// What turns the text of a block into an object file. `BLAZE_ASSEMBLER=cc` picks the C
+ /// compiler in a build with LLVM.
+-#[derive(Clone, Copy)]
+ enum Assembler {
+     /// The platform's C compiler, run as a process: clang, or a `cc` for the host.
+-    Cc,
++    Cc(Option<(PathBuf, Vec<String>)>),
+     /// LLVM's, in this process, when blaze is built with LLVM.
+     #[cfg(feature = "llvm")]
+     Llvm,
+ }
+ 
+ impl Assembler {
+-    fn selected() -> Assembler {
++    fn selected(triple: &str) -> Assembler {
+         if std::env::var("BLAZE_ASSEMBLER").as_deref() == Ok("cc") {
+-            return Assembler::Cc;
++            return Assembler::Cc(c_compiler(triple));
+         }
+         #[cfg(feature = "llvm")]
+         return Assembler::Llvm;
+         #[cfg(not(feature = "llvm"))]
+-        Assembler::Cc
++        Assembler::Cc(c_compiler(triple))
+     }
+ 
+-    fn assemble(self, triple: &str, text: &str, key: &[u8; 32]) -> Result<Assembled, String> {
++    fn assemble(&self, triple: &str, text: &str, key: &[u8; 32]) -> Result<Assembled, String> {
+         match self {
+-            Assembler::Cc => run_cc(triple, text, key).unwrap_or_else(|| Err(no_assembler(triple))),
++            Assembler::Cc(Some((compiler, target))) => run_cc(compiler, target, triple, text, key),
++            Assembler::Cc(None) => Err(no_assembler(triple)),
+             #[cfg(feature = "llvm")]
+             Assembler::Llvm => code(&super::llvm::assemble(text)?),
+         }
+     }
++
++    fn identity(&self) -> Result<[u8; 32], String> {
++        use std::io::Read;
++        let mut hash = Sha256::new();
++        let mut field = |bytes: &[u8]| {
++            hash.update((bytes.len() as u64).to_le_bytes());
++            hash.update(bytes);
++        };
++        match self {
++            Assembler::Cc(None) => field(b"cc unavailable"),
++            Assembler::Cc(Some((compiler, target))) => {
++                field(b"cc");
++                field(compiler.as_os_str().as_encoded_bytes());
++                for arg in target {
++                    field(arg.as_bytes());
++                }
++                // Hash the tool itself, not just its name or version banner. Stream it
++                // once per worker, so large Clang binaries do not inflate each asm job.
++                let read_error = |e| format!("reading assembler {}: {e}", compiler.display());
++                let mut file = std::fs::File::open(compiler).map_err(read_error)?;
++                let mut content = Sha256::new();
++                let mut buffer = [0; 64 * 1024];
++                loop {
++                    let len = file.read(&mut buffer).map_err(read_error)?;
++                    if len == 0 {
++                        break;
++                    }
++                    content.update(&buffer[..len]);
++                }
++                field(&content.finalize());
++            }
++            #[cfg(feature = "llvm")]
++            Assembler::Llvm => {
++                field(b"llvm");
++                field(include_bytes!("llvm.json"));
++            }
++        }
++        Ok(hash.finalize().into())
++    }
++}
++
++struct SelectedAssembler {
++    backend: Assembler,
++    key: [u8; 32],
++}
++
++// Tool selection, like the target and the build environment, is fixed for a worker.
++// Keep the command whose identity we hashed: do not resolve PATH again when assembling.
++// Restart the worker when changing its tools.
++fn selected_assembler(triple: &str) -> Result<Arc<SelectedAssembler>, String> {
++    type Selected = Result<Arc<SelectedAssembler>, String>;
++    static SELECTED: OnceLock<Mutex<FxHashMap<String, Selected>>> = OnceLock::new();
++    let mut selected =
++        SELECTED.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner());
++    selected
++        .entry(triple.to_owned())
++        .or_insert_with(|| {
++            let backend = Assembler::selected(triple);
++            let key = backend.identity()?;
++            Ok(Arc::new(SelectedAssembler { backend, key }))
++        })
++        .clone()
++}
++
++/// Includes availability, backend and the selected tool's contents. Standard-library
++/// objects cache refusals too, so installing an assembler must change their identity.
++pub fn assembler_cache_key(triple: &str) -> Result<[u8; 32], String> {
++    Ok(selected_assembler(triple)?.key)
+ }
+ 
+ /// The text as rustc hands it to the assembler: `asm!` is in Intel's syntax on x86-64.
+@@ -1438,9 +1508,14 @@ fn no_assembler(triple: &str) -> String {
+     )
+ }
+ 
+-/// The block assembled by the platform's C compiler. `None` when there is none for `triple`.
+-fn run_cc(triple: &str, text: &str, key: &[u8; 32]) -> Option<Result<Assembled, String>> {
+-    let (compiler, target) = c_compiler(triple)?;
++/// The block assembled by the C compiler selected and fingerprinted for this worker.
++fn run_cc(
++    compiler: &Path,
++    target: &[String],
++    triple: &str,
++    text: &str,
++    key: &[u8; 32],
++) -> Result<Assembled, String> {
+     static RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+     let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+     let name: String =
+@@ -1448,12 +1523,12 @@ fn run_cc(triple: &str, text: &str, key: &[u8; 32]) -> Option<Result<Assembled,
+     let dir = std::env::temp_dir().join(format!("blaze-asm-{}", std::process::id()));
+     let failed = |what: &str, e: &dyn std::fmt::Display| format!("inline assembly: {what}: {e}");
+     if let Err(e) = std::fs::create_dir_all(&dir) {
+-        return Some(Err(failed("no directory to assemble in", &e)));
++        return Err(failed("no directory to assemble in", &e));
+     }
+     let object = dir.join(name);
+     #[allow(clippy::disallowed_methods)]
+-    let child = Command::new(&compiler)
+-        .args(&target)
++    let child = Command::new(compiler)
++        .args(target)
+         .args(["-c", "-x", "assembler", "-o"])
+         .arg(&object)
+         .arg("-")
+@@ -1476,7 +1551,7 @@ fn run_cc(triple: &str, text: &str, key: &[u8; 32]) -> Option<Result<Assembled,
+         Err(e) => Err(failed(&format!("{said} did not run"), &e)),
+     };
+     _ = std::fs::remove_file(&object);
+-    Some(code)
++    code
+ }
+ 
+ /// The function in an object that defines it alone.
+@@ -1540,6 +1615,35 @@ fn code(object: &[u8]) -> Result<Assembled, String> {
+ mod tests {
+     use super::{Arch, extensions, hash_comment};
+ 
++    #[test]
++    fn assembler_identity_tracks_availability_tool_contents_and_arguments() {
++        use super::Assembler;
++        let dir = stdx::tempfile::NamedTempDir::new("blaze-assembler-identity").unwrap();
++        let compiler = dir.path().join("clang.exe");
++        std::fs::write(&compiler, b"assembler version one").unwrap();
++        let selected =
++            Assembler::Cc(Some((compiler.clone(), vec!["--target=x86_64-pc-windows-msvc".into()])));
++        let first = selected.identity().unwrap();
++        assert_eq!(first, selected.identity().unwrap());
++        assert_ne!(first, Assembler::Cc(None).identity().unwrap());
++        // Same path, same length, different bytes: a replaced tool cannot reuse its output.
++        std::fs::write(&compiler, b"assembler version two").unwrap();
++        let second = selected.identity().unwrap();
++        assert_ne!(first, second);
++        let other_target = Assembler::Cc(Some((
++            compiler.clone(),
++            vec!["--target=aarch64-pc-windows-msvc".into()],
++        )));
++        assert_ne!(second, other_target.identity().unwrap());
++        let other_path = dir.path().join("other-clang.exe");
++        std::fs::copy(&compiler, &other_path).unwrap();
++        let other_tool =
++            Assembler::Cc(Some((other_path, vec!["--target=x86_64-pc-windows-msvc".into()])));
++        assert_ne!(second, other_tool.identity().unwrap());
++        std::fs::remove_file(&compiler).unwrap();
++        assert!(selected.identity().is_err());
++    }
++
+     /// compiler_builtins' `__rust_probestack` ends an instruction with `// ...`.
+     #[test]
+     fn a_comment_of_two_slashes_is_one_gnu_as_reads() {
+diff --git a/crates/hir-ty-codegen/cached.rs b/crates/hir-ty-codegen/cached.rs
+index 0459bb1..4118189 100644
+--- a/crates/hir-ty-codegen/cached.rs
++++ b/crates/hir-ty-codegen/cached.rs
+@@ -718,8 +718,7 @@ impl Writer {
+             let queued = Arc::new(Mutex::new(queued));
+             // A whole build hands over most of its entries at once, when its last wave is
+             // compiled: one thread would write them after the link.
+-            let count =
+-                std::thread::available_parallelism().map_or(1, |it| it.get() / 8).clamp(1, 8);
++            let count = (stdx::thread::compute_workers() / 8).clamp(1, 8);
+             let threads: Vec<_> = (0..count)
+                 .map_while(|_| {
+                     let mut writer =
+@@ -877,7 +876,7 @@ impl Entries {
+     /// from every core in no order, and each read unpacked a block a hundred times the size
+     /// of the entry: blaze's own build spent some 1000 s of its threads' time on it.
+     pub(super) fn prefetch(&self, names: impl IntoIterator<Item = Arc<str>>) {
+-        let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++        let threads = stdx::thread::compute_workers();
+         let tally = super::backend::Tally::global();
+         let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
+         let mut wave: Vec<Arc<str>> =
+diff --git a/crates/hir-ty-codegen/debuginfo.rs b/crates/hir-ty-codegen/debuginfo.rs
+index d33f29e..b0b2053 100644
+--- a/crates/hir-ty-codegen/debuginfo.rs
++++ b/crates/hir-ty-codegen/debuginfo.rs
+@@ -461,7 +461,7 @@ impl Describer {
+     /// linker puts the sections of one name together, and each unit reads the sections
+     /// beside it.
+     pub(super) fn new(context: DebugContext, elf: bool) -> Describer {
+-        let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++        let threads = stdx::thread::compute_workers();
+         let mut contexts = vec![];
+         if let DebugContext::Dwarf(dwarf) = &context
+             && elf
+diff --git a/crates/hir-ty-codegen/mod.rs b/crates/hir-ty-codegen/mod.rs
+index c07f25e..f28b621 100644
+--- a/crates/hir-ty-codegen/mod.rs
++++ b/crates/hir-ty-codegen/mod.rs
+@@ -99,6 +99,7 @@ use hir_ty_mir::mir::{
+ };
+ 
+ mod asm;
++pub use asm::assembler_cache_key;
+ mod avx512;
+ mod backend;
+ use backend::Step;
+@@ -5652,7 +5653,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
+         let owned = &self.own_statics.crates;
+         let next = std::sync::atomic::AtomicUsize::new(0);
+         let named = std::sync::Mutex::new(Vec::new());
+-        let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++        let threads = stdx::thread::compute_workers();
+         self.symbols.in_parallel(threads, &|db, symbols, _| {
+             let names = stable::StableNames::new(db, symbols, owned.clone(), true);
+             let mut here = Vec::new();
+@@ -6008,7 +6009,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
+         let waits: Waits = Default::default();
+         let (work_to_do, progress) = (&waits.0, &waits.1);
+         let (rejected, hydrate) = (self.rejected, self.hydrate);
+-        let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++        let threads = stdx::thread::compute_workers();
+         let (entries, owned) = (self.entries.clone(), &self.own_statics.crates.clone());
+         let entries = entries.as_deref();
+         let told = self.tells_variables().then(|| self.told.clone());
+@@ -6370,7 +6371,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
+                         Some((part, kept, misses));
+                 }
+             };
+-            let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++            let threads = stdx::thread::compute_workers();
+             self.symbols.in_parallel(threads.min(parts.len()), &work);
+         }
+         for (part, made) in parts.iter().zip(made) {
+diff --git a/crates/hir-ty-codegen/units.rs b/crates/hir-ty-codegen/units.rs
+index 0698369..ee69680 100644
+--- a/crates/hir-ty-codegen/units.rs
++++ b/crates/hir-ty-codegen/units.rs
+@@ -299,7 +299,7 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
+         };
+         let mut wave = Vec::new();
+         tried.add(self.symbols, Found { instances, roots: roots.to_vec() }, &mut wave);
+-        let threads = std::thread::available_parallelism().map_or(1, |it| it.get());
++        let threads = stdx::thread::compute_workers();
+         let told = self.tells_variables().then(|| self.told.clone());
+         let entries = self.entries.as_deref();
+         let ctx = Context {
+diff --git a/crates/hir-ty-mir/src/mir/lower.rs b/crates/hir-ty-mir/src/mir/lower.rs
+index 8b6c91f..51758b0 100644
+--- a/crates/hir-ty-mir/src/mir/lower.rs
++++ b/crates/hir-ty-mir/src/mir/lower.rs
+@@ -2865,6 +2865,13 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
+             Expr::RecordLit { fields, spread: RecordSpread::None, .. } => {
+                 fields.clone().iter().all(|it| self.is_promotable(it.expr))
+             }
++            // A block with only item statements has the value of its tail. Macro expansions
++            // commonly wrap constructor aggregates in such a block, and rustc promotes them.
++            Expr::Block { statements, tail: Some(tail), .. }
++                if statements.iter().all(|it| matches!(it, hir_def::hir::Statement::Item(_))) =>
++            {
++                self.is_promotable(*tail)
++            }
+             &Expr::Field { expr, .. } => self.is_promotable(expr),
+             Expr::Call { callee, args } => {
+                 let TyKind::FnDef(def, _) = self.expr_ty_without_adjust(*callee).kind() else {
+diff --git a/crates/hir-ty/src/infer.rs b/crates/hir-ty/src/infer.rs
+index c358a06..a8e22c9 100644
+--- a/crates/hir-ty/src/infer.rs
++++ b/crates/hir-ty/src/infer.rs
+@@ -180,9 +180,7 @@ pub fn infer_query_with_inspect<'db>(
+ 
+     ctx.infer_body(body.root_expr());
+ 
+-    ctx.infer_mut_body(body.root_expr());
+-
+-    infer_finalize(ctx)
++    infer_finalize(ctx, Some(body.root_expr()))
+ }
+ 
+ fn infer_cycle_result<'db>(
+@@ -225,7 +223,7 @@ fn infer_anon_const_query<'db>(
+         ExprIsRead::Yes,
+     );
+ 
+-    infer_finalize(ctx)
++    infer_finalize(ctx, None)
+ }
+ 
+ fn infer_anon_const_cycle_result<'db>(
+@@ -239,7 +237,10 @@ fn infer_anon_const_cycle_result<'db>(
+     }
+ }
+ 
+-fn infer_finalize<'db>(mut ctx: InferenceContext<'db>) -> InferenceResult<'db> {
++fn infer_finalize<'db>(
++    mut ctx: InferenceContext<'db>,
++    body_root_expr: Option<ExprId>,
++) -> InferenceResult<'db> {
+     ctx.handle_opaque_type_uses();
+ 
+     ctx.type_inference_fallback();
+@@ -254,6 +255,12 @@ fn infer_finalize<'db>(mut ctx: InferenceContext<'db>) -> InferenceResult<'db> {
+         }
+     }
+ 
++    // Coercion casts can add borrow and dereference adjustments. Select mutable
++    // place operations only after those adjustments have been recorded.
++    if let Some(body_root_expr) = body_root_expr {
++        ctx.infer_mut_body(body_root_expr);
++    }
++
+     ctx.table.select_obligations_where_possible();
+ 
+     // Closure and coroutine analysis may run after fallback
+diff --git a/crates/hir-ty/src/infer/mutability.rs b/crates/hir-ty/src/infer/mutability.rs
+index 0cf1c6e..b265538 100644
+--- a/crates/hir-ty/src/infer/mutability.rs
++++ b/crates/hir-ty/src/infer/mutability.rs
+@@ -6,11 +6,13 @@ use hir_def::hir::{
+     Statement, UnaryOp,
+ };
+ use rustc_ast_ir::Mutability;
++use rustc_type_ir::inherent::IntoKind;
+ 
+ use crate::{
+     Adjust, AutoBorrow, OverloadedDeref,
+     infer::{InferenceContext, place_op::PlaceOp},
+     lower::lower_mutability,
++    next_solver::TyKind,
+ };
+ 
+ impl<'db> InferenceContext<'db> {
+@@ -166,10 +168,22 @@ impl<'db> InferenceContext<'db> {
+             }
+             Expr::UnaryOp { expr, op: _ }
+             | Expr::Await { expr }
+-            | Expr::Loop { body: expr, label: _, source: _ }
+-            | Expr::Cast { expr, type_ref: _ } => {
++            | Expr::Loop { body: expr, label: _, source: _ } => {
+                 self.infer_mut_expr(*expr, Mutability::Not);
+             }
++            Expr::Cast { expr, type_ref: _ } => {
++                // A coercion cast to `&mut T` can dereference its operand through
++                // `DerefMut`, including `&mut Pin<Box<T>> as &mut T`.
++                let mutability = match self.result.type_of_expr.get(tgt_expr) {
++                    Some(ty)
++                        if matches!(ty.as_ref().kind(), TyKind::Ref(_, _, Mutability::Mut)) =>
++                    {
++                        Mutability::Mut
++                    }
++                    _ => Mutability::Not,
++                };
++                self.infer_mut_expr(*expr, mutability);
++            }
+             Expr::Ref { expr, rawness: _, mutability } => {
+                 let mutability = lower_mutability(*mutability);
+                 self.infer_mut_expr(*expr, mutability);
+diff --git a/crates/ide-diagnostics/src/borrowck_nested_return_tests.rs b/crates/ide-diagnostics/src/borrowck_nested_return_tests.rs
+new file mode 100644
+index 0000000..58fc0de
+--- /dev/null
++++ b/crates/ide-diagnostics/src/borrowck_nested_return_tests.rs
+@@ -0,0 +1,34 @@
++use crate::tests::check_diagnostics;
++
++#[test]
++fn opaque_return_keeps_declared_wrapper_outlives_bounds() {
++    check_diagnostics(
++        r#"
++//- minicore: sized, option
++//- /main.rs edition:2024
++struct Explicit<'a: 'b, 'b, T>(&'a (), &'b (), T);
++struct Inferred<'a, 'b, T>(Option<&'b &'a ()>, T);
++fn explicit<'a, 'b>(a: &'a (), b: &'b ()) -> Explicit<'a, 'b, impl Sized> {
++    Explicit(a, b, ())
++}
++fn inferred<'a, 'b>(a: &'a (), b: &'b ()) -> Inferred<'a, 'b, impl Sized> {
++    Inferred(None, ())
++}
++"#,
++    );
++}
++
++#[test]
++fn opaque_return_does_not_assume_hidden_wrapper_outlives_bounds() {
++    check_diagnostics(
++        r#"
++//- minicore: sized
++//- /main.rs edition:2024
++struct Wrapper<'a: 'b, 'b, T>(&'a (), &'b (), T);
++fn hidden<'a, 'b>(a: &'a (), b: &'b ()) -> impl Sized {
++ //^^^^^^ error: hidden type for `impl Trait` captures lifetime that does not appear in bounds
++    Wrapper(a, b, ())
++}
++"#,
++    );
++}
+diff --git a/crates/ide-diagnostics/src/handlers/borrowck.rs b/crates/ide-diagnostics/src/handlers/borrowck.rs
+index 387073d..3539120 100644
+--- a/crates/ide-diagnostics/src/handlers/borrowck.rs
++++ b/crates/ide-diagnostics/src/handlers/borrowck.rs
+@@ -660,6 +660,53 @@ async fn local() {
+     if let Some(_g) = memory.lock() {}
+                     //^^^^^^ error: `memory` does not live long enough
+ }
++"#,
++        );
++    }
++
++    #[test]
++    fn mutable_reference_cast_uses_deref_mut() {
++        check_diagnostics(
++            r#"
++//- minicore: sized, deref, deref_mut
++//- /main.rs edition:2024
++use core::ops::{Deref, DerefMut};
++struct State(u8);
++struct Wrapper(State);
++impl Deref for Wrapper {
++    type Target = State;
++    fn deref(&self) -> &State { &self.0 }
++}
++impl DerefMut for Wrapper {
++    fn deref_mut(&mut self) -> &mut State { &mut self.0 }
++}
++fn direct(value: &mut Wrapper) -> *mut State { value as &mut State }
++fn identity(value: &mut Wrapper) -> &mut Wrapper { value }
++fn through_call(value: &mut Wrapper) -> *mut State {
++    identity(value) as &mut State
++}
++fn shared(value: &Wrapper) -> *const State { value as &State }
++"#,
++        );
++    }
++
++    #[test]
++    fn mutable_reference_cast_without_deref_mut_is_rejected() {
++        check_diagnostics(
++            r#"
++//- minicore: sized, deref
++//- /main.rs edition:2024
++use core::ops::Deref;
++struct State(u8);
++struct ReadOnly(State);
++impl Deref for ReadOnly {
++    type Target = State;
++    fn deref(&self) -> &State { &self.0 }
++}
++fn denied(value: &mut ReadOnly) -> *mut State {
++    value as &mut State
++  //^^^^^ error: cannot borrow data as mutable as it is behind a `&` reference
++}
+ "#,
+         );
+     }
+diff --git a/crates/ide-diagnostics/src/lib.rs b/crates/ide-diagnostics/src/lib.rs
+index 5659c2c..35c204c 100644
+--- a/crates/ide-diagnostics/src/lib.rs
++++ b/crates/ide-diagnostics/src/lib.rs
+@@ -119,6 +119,9 @@ mod handlers {
+ #[cfg(test)]
+ mod tests;
+ 
++#[cfg(test)]
++mod borrowck_nested_return_tests;
++
+ use std::sync::LazyLock;
+ 
+ use hir::{Crate, DisplayTarget, InFile, MacroCallIdExt, Semantics, diagnostics::AnyDiagnostic};
+diff --git a/crates/ide-diagnostics/src/tests.rs b/crates/ide-diagnostics/src/tests.rs
+index 4b9535c..e2ded41 100644
+--- a/crates/ide-diagnostics/src/tests.rs
++++ b/crates/ide-diagnostics/src/tests.rs
+@@ -1,6 +1,7 @@
+ #![allow(clippy::print_stderr)]
+ 
+ mod overly_long_real_world_cases;
++mod promoted_block;
+ 
+ use hir::setup_tracing;
+ use ide_db::{
+diff --git a/crates/ide-diagnostics/src/tests/promoted_block.rs b/crates/ide-diagnostics/src/tests/promoted_block.rs
+new file mode 100644
+index 0000000..ba4840f
+--- /dev/null
++++ b/crates/ide-diagnostics/src/tests/promoted_block.rs
+@@ -0,0 +1,52 @@
++use crate::tests::check_diagnostics;
++
++#[test]
++fn macro_block_of_immutable_enum_constructors_is_promoted() {
++    check_diagnostics(
++        r#"
++//- minicore: sized, copy
++//- /main.rs edition:2024
++enum Rule {
++    Atom(&'static str),
++    Next(&'static Rule, &'static Rule),
++}
++
++macro_rules! atom_in_block {
++    ($name:literal) => {{ Rule::Atom($name) }};
++}
++
++fn grammar_rule() -> Rule {
++    Rule::Next(&Rule::Atom("first"), &atom_in_block!("second"))
++}
++
++fn item_only_block() -> &'static Rule {
++    &{ const NAME: &str = "third"; Rule::Atom(NAME) }
++}
++"#,
++    );
++}
++
++#[test]
++fn macro_block_does_not_promote_values_with_drop_or_interior_mutability() {
++    check_diagnostics(
++        r#"
++//- minicore: sized, copy, drop, cell, unsize, coerce_unsized
++//- /main.rs edition:2024
++use core::cell::Cell;
++
++struct Droppy;
++impl Drop for Droppy { fn drop(&mut self) {} }
++const INTERIOR: Cell<u8> = Cell::new(1);
++
++fn take_drop(_: &'static Droppy) {}
++fn take_cell(_: &'static Cell<u8>) {}
++
++fn rejected() {
++    take_drop(&{ Droppy });
++            //^^^^^^^^^^^ error: temporary value dropped while borrowed
++    take_cell(&{ INTERIOR });
++            //^^^^^^^^^^^^^ error: temporary value dropped while borrowed
++}
++"#,
++    );
++}
+diff --git a/crates/stdx/src/thread.rs b/crates/stdx/src/thread.rs
+index 0000fd1..ac5e724 100644
+--- a/crates/stdx/src/thread.rs
++++ b/crates/stdx/src/thread.rs
+@@ -16,6 +16,7 @@
+ //! and every entry point to creating a thread requires a [`ThreadIntent`] upfront.
+ 
+ use std::fmt;
++use std::num::NonZeroUsize;
+ 
+ mod intent;
+ mod pool;
+@@ -23,6 +24,25 @@ mod pool;
+ pub use intent::ThreadIntent;
+ pub use pool::Pool;
+ 
++/// Threads for a build's computation. A positive `CARGO_BUILD_JOBS` limits
++/// blaze's own analysis and code generation as well as Cargo's work.
++pub fn compute_workers() -> usize {
++    let available = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
++    let jobs = std::env::var_os("CARGO_BUILD_JOBS")
++        .map(|it| it.into_string().expect("CARGO_BUILD_JOBS must be a positive integer"));
++    configured_workers(jobs.as_deref(), available).unwrap_or_else(|why| panic!("{why}: {jobs:?}"))
++}
++
++fn configured_workers(jobs: Option<&str>, available: usize) -> Result<usize, &'static str> {
++    match jobs {
++        None => Ok(available),
++        Some(jobs) => jobs
++            .parse::<NonZeroUsize>()
++            .map(NonZeroUsize::get)
++            .map_err(|_| "CARGO_BUILD_JOBS must be a positive integer"),
++    }
++}
++
+ /// # Panics
+ ///
+ /// Panics if failed to spawn the thread.
+@@ -112,3 +132,18 @@ impl<T> fmt::Debug for JoinHandle<T> {
+         f.pad("JoinHandle { .. }")
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::configured_workers;
++
++    #[test]
++    fn cargo_jobs_bounds_compute_threads() {
++        assert_eq!(configured_workers(None, 8), Ok(8));
++        assert_eq!(configured_workers(Some("1"), 8), Ok(1));
++        assert_eq!(configured_workers(Some("4"), 8), Ok(4));
++        for invalid in ["", "0", "-1", "invalid", "18446744073709551616"] {
++            assert!(configured_workers(Some(invalid), 8).is_err(), "{invalid:?}");
++        }
++    }
++}
+diff --git a/vendor/proc-macro-srv/Cargo.lock b/vendor/proc-macro-srv/Cargo.lock
+index 45e8787..d7f0008 100644
+--- a/vendor/proc-macro-srv/Cargo.lock
++++ b/vendor/proc-macro-srv/Cargo.lock
+@@ -825,6 +825,7 @@ dependencies = [
+  "stdx",
+  "tracing",
+  "triomphe",
++ "unicode-ident",
+ ]
+ 
+ [[package]]
+diff --git a/vendor/proc-macro-srv/crates/proc-macro-srv-cli/Cargo.toml b/vendor/proc-macro-srv/crates/proc-macro-srv-cli/Cargo.toml
+index a90cb6a..d049e8b 100644
+--- a/vendor/proc-macro-srv/crates/proc-macro-srv-cli/Cargo.toml
++++ b/vendor/proc-macro-srv/crates/proc-macro-srv-cli/Cargo.toml
+@@ -21,6 +21,7 @@ clap = {version = "4.5.42", default-features = false, features = ["std"]}
+ [features]
+ default = ["in-rust-tree"]
+ in-rust-tree = ["proc-macro-srv/in-rust-tree", "proc-macro-api/in-rust-tree"]
++native-rustc-loader = ["in-rust-tree", "proc-macro-srv/native-rustc-loader"]
+ 
+ [[bin]]
+ name = "rust-analyzer-proc-macro-srv"
+diff --git a/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/lib.rs b/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/lib.rs
+index 5d8d139..25d3425 100644
+--- a/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/lib.rs
++++ b/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/lib.rs
+@@ -3,5 +3,6 @@
+ //! This module exposes the server main loop and protocol format for integration testing.
+ 
+ #![cfg(feature = "in-rust-tree")]
++#![cfg_attr(feature = "native-rustc-loader", feature(rustc_private))]
+ 
+ pub mod main_loop;
+diff --git a/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/main.rs b/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/main.rs
+index b2a7445..f4c0ce2 100644
+--- a/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/main.rs
++++ b/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/main.rs
+@@ -2,6 +2,7 @@
+ //! Driver for proc macro server
+ #![cfg_attr(not(feature = "in-rust-tree"), allow(unused_crate_dependencies))]
+ #![allow(clippy::print_stdout, clippy::print_stderr)]
++#![cfg_attr(feature = "native-rustc-loader", feature(rustc_private))]
+ 
+ mod version;
+ 
+diff --git a/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/main_loop.rs b/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/main_loop.rs
+index 6697b63..a027386 100644
+--- a/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/main_loop.rs
++++ b/vendor/proc-macro-srv/crates/proc-macro-srv-cli/src/main_loop.rs
+@@ -358,6 +358,11 @@ impl proc_macro_srv::ProcMacroClientInterface for ProcMacroClientHandle<'_> {
+         first: proc_macro_srv::span::Span,
+         second: proc_macro_srv::span::Span,
+     ) -> Option<proc_macro_srv::span::Span> {
++        // A span cannot encompass text from two files. The request below carries only one
++        // file ID, and proc_macro::Span::join returns None for spans from different files.
++        if first.anchor.file_id != second.anchor.file_id {
++            return None;
++        }
+         assert_eq!(first.anchor.file_id, second.anchor.file_id);
+         let response = self.roundtrip(bidirectional::SubRequest::SpanJoin {
+             file_id: first.anchor.file_id.as_u32(),
+@@ -394,6 +399,63 @@ impl proc_macro_srv::ProcMacroClientInterface for ProcMacroClientHandle<'_> {
+     }
+ }
+ 
++#[cfg(test)]
++mod tests {
++    use std::io::Cursor;
++
++    use proc_macro_api::legacy_protocol::msg::Message;
++    use proc_macro_srv::{ProcMacroClientInterface, span};
++
++    use super::{ProcMacroClientHandle, bidirectional};
++
++    #[test]
++    fn span_join_of_different_files_returns_none_without_a_request() {
++        let span = |file_id| span::Span {
++            range: span::TextRange::new(span::TextSize::new(0), span::TextSize::new(1)),
++            anchor: span::SpanAnchor {
++                file_id: span::EditionedFileId::new(
++                    span::FileId::from_raw(file_id),
++                    span::Edition::Edition2021,
++                ),
++                ast_id: span::ROOT_ERASED_FILE_AST_ID,
++            },
++            // SAFETY: without salsa, every u32 is a valid syntax context.
++            ctx: unsafe { span::SyntaxContext::from_u32(0) },
++        };
++        let response = bidirectional::BidirectionalMessage::SubResponse(
++            bidirectional::SubResponse::SpanJoinResult {
++                span: Some(bidirectional::SpanJoin {
++                    ast_id: span::ROOT_ERASED_FILE_AST_ID.into_raw(),
++                    start: 0,
++                    end: 3,
++                    ctx: 0,
++                }),
++            },
++        );
++        let mut encoded = Vec::new();
++        response.write(&mut encoded).unwrap();
++        let mut input = Cursor::new(encoded);
++        let mut output = Vec::new();
++        let mut buf = Vec::new();
++        {
++            let mut client =
++                ProcMacroClientHandle { stdin: &mut input, stdout: &mut output, buf: &mut buf };
++            assert_eq!(client.span_join(span(2162), span(232)), None);
++        }
++        assert!(output.is_empty(), "a cross-file join must not send a one-file request");
++
++        let mut client =
++            ProcMacroClientHandle { stdin: &mut input, stdout: &mut output, buf: &mut buf };
++        let mut joined = span(2162);
++        joined.range = span::TextRange::new(span::TextSize::new(0), span::TextSize::new(3));
++        let mut second = span(2162);
++        second.range = span::TextRange::new(span::TextSize::new(2), span::TextSize::new(3));
++        assert_eq!(client.span_join(span(2162), second), Some(joined));
++        drop(client);
++        assert!(!output.is_empty(), "a same-file join must still use the protocol");
++    }
++}
++
+ fn handle_expand_ra(
+     srv: &proc_macro_srv::ProcMacroSrv<'_>,
+     stdin: &mut (dyn BufRead + Send + Sync),
+diff --git a/vendor/proc-macro-srv/crates/proc-macro-srv/Cargo.toml b/vendor/proc-macro-srv/crates/proc-macro-srv/Cargo.toml
+index 862c81e..e1d59fb 100644
+--- a/vendor/proc-macro-srv/crates/proc-macro-srv/Cargo.toml
++++ b/vendor/proc-macro-srv/crates/proc-macro-srv/Cargo.toml
+@@ -27,7 +27,7 @@ libc.workspace = true
+ [features]
+ default = []
+ in-rust-tree = ["dep:intern", "dep:paths", "dep:rustc-hash", "dep:span", "dep:stdx"]
++native-rustc-loader = ["in-rust-tree"]
+ 
+ [lints]
+ workspace = true
+-
+diff --git a/vendor/proc-macro-srv/crates/proc-macro-srv/src/dylib_native.rs b/vendor/proc-macro-srv/crates/proc-macro-srv/src/dylib_native.rs
+new file mode 100644
+index 0000000..b597f88
+--- /dev/null
++++ b/vendor/proc-macro-srv/crates/proc-macro-srv/src/dylib_native.rs
+@@ -0,0 +1,113 @@
++//! Handles dynamic library loading for proc macro
++
++#[path = "dylib_native/proc_macros.rs"]
++mod proc_macros;
++
++use paths::{Utf8Path, Utf8PathBuf};
++use rustc_codegen_ssa::back::metadata::DefaultMetadataLoader;
++use rustc_interface::util::rustc_version_str;
++use rustc_proc_macro::bridge;
++use std::{fs, io, path::Path, time::SystemTime};
++use stdx::tempfile::NamedTempFile;
++
++use crate::{
++    PanicMessage, ProcMacroClientHandle, ProcMacroKind, ProcMacroSrvSpan, TrackedEnv,
++    dylib::proc_macros::ProcMacros, token_stream::TokenStream,
++};
++
++pub(crate) struct Expander {
++    inner: ProcMacroLibrary,
++    modified_time: SystemTime,
++    _file: NamedTempFile,
++}
++
++impl Expander {
++    pub(crate) fn new(lib: &Utf8Path) -> io::Result<Expander> {
++        // Some libraries for dynamic loading require canonicalized path even when it is
++        // already absolute
++        let lib = lib.canonicalize_utf8()?;
++        let modified_time = fs::metadata(&lib).and_then(|it| it.modified())?;
++
++        let file = ensure_file_with_lock_free_access(lib);
++        let library = ProcMacroLibrary::open(file.path())?;
++
++        Ok(Expander { inner: library, modified_time, _file: file })
++    }
++
++    pub(crate) fn expand<'a, S: ProcMacroSrvSpan + 'a>(
++        &self,
++        macro_name: &str,
++        macro_body: TokenStream<S>,
++        attribute: Option<TokenStream<S>>,
++        def_site: S,
++        call_site: S,
++        mixed_site: S,
++        tracked_env: &'a mut TrackedEnv,
++        callback: Option<ProcMacroClientHandle<'a>>,
++    ) -> Result<TokenStream<S>, PanicMessage>
++    where
++        <S::Server<'a> as bridge::server::Server>::TokenStream: Default,
++    {
++        self.inner.proc_macros.expand(
++            macro_name,
++            macro_body,
++            attribute,
++            def_site,
++            call_site,
++            mixed_site,
++            tracked_env,
++            callback,
++        )
++    }
++
++    pub(crate) fn list_macros(&self) -> impl Iterator<Item = (&str, ProcMacroKind)> {
++        self.inner.proc_macros.list_macros()
++    }
++
++    pub(crate) fn modified_time(&self) -> SystemTime {
++        self.modified_time
++    }
++}
++
++struct ProcMacroLibrary {
++    proc_macros: ProcMacros,
++}
++
++impl ProcMacroLibrary {
++    fn open(path: &Path) -> io::Result<Self> {
++        let proc_macros = rustc_span::create_default_session_globals_then(|| {
++            rustc_metadata::locator::get_proc_macros(
++                path,
++                &DefaultMetadataLoader,
++                rustc_version_str().unwrap_or("unknown"),
++            )
++        })?;
++
++        Ok(ProcMacroLibrary { proc_macros: ProcMacros::new(proc_macros) })
++    }
++}
++
++/// Copy the dylib to temp directory to prevent locking in Windows
++#[cfg(windows)]
++fn ensure_file_with_lock_free_access(path: Utf8PathBuf) -> NamedTempFile {
++    if std::env::var("RA_DONT_COPY_PROC_MACRO_DLL").is_ok() {
++        return NamedTempFile::from_path(path.into_std_path_buf());
++    }
++
++    (|| {
++        let file_name = path.file_stem().ok_or_else(|| {
++            io::Error::new(io::ErrorKind::InvalidInput, format!("File path is invalid: {path}"))
++        })?;
++
++        NamedTempFile::new_from_existing(
++            &format!("proc-macro-srv-{file_name}.dll"),
++            path.as_std_path(),
++        )
++    })()
++    .unwrap_or_else(|_err| NamedTempFile::from_path(path.into_std_path_buf()))
++}
++
++#[cfg(unix)]
++fn ensure_file_with_lock_free_access(path: Utf8PathBuf) -> NamedTempFile {
++    NamedTempFile::from_path(path.into_std_path_buf())
++}
+diff --git a/vendor/proc-macro-srv/crates/proc-macro-srv/src/dylib_native/proc_macros.rs b/vendor/proc-macro-srv/crates/proc-macro-srv/src/dylib_native/proc_macros.rs
+new file mode 100644
+index 0000000..4976298
+--- /dev/null
++++ b/vendor/proc-macro-srv/crates/proc-macro-srv/src/dylib_native/proc_macros.rs
+@@ -0,0 +1,87 @@
++//! Proc macro ABI
++use crate::{
++    ProcMacroClientHandle, ProcMacroKind, ProcMacroSrvSpan, TrackedEnv, token_stream::TokenStream,
++};
++use rustc_proc_macro::bridge;
++
++impl From<bridge::PanicMessage> for crate::PanicMessage {
++    fn from(p: bridge::PanicMessage) -> Self {
++        Self { message: p.into_string() }
++    }
++}
++
++pub(crate) struct ProcMacros(Vec<(bridge::client::Client, rustc_metadata::ProcMacroKind)>);
++
++impl ProcMacros {
++    pub(super) fn new(
++        macros: Vec<(bridge::client::Client, rustc_metadata::ProcMacroKind)>,
++    ) -> Self {
++        ProcMacros(macros)
++    }
++
++    pub(crate) fn expand<'a, S: ProcMacroSrvSpan>(
++        &self,
++        macro_name: &str,
++        macro_body: TokenStream<S>,
++        attribute: Option<TokenStream<S>>,
++        def_site: S,
++        call_site: S,
++        mixed_site: S,
++        tracked_env: &'a mut TrackedEnv,
++        callback: Option<ProcMacroClientHandle<'a>>,
++    ) -> Result<TokenStream<S>, crate::PanicMessage> {
++        let parsed_attributes = attribute.unwrap_or_default();
++
++        for (client, kind) in &self.0 {
++            match kind {
++                rustc_metadata::ProcMacroKind::CustomDerive { trait_name, .. }
++                    if trait_name.as_str() == macro_name =>
++                {
++                    let res = client.run1(
++                        &bridge::server::SAME_THREAD,
++                        S::make_server(call_site, def_site, mixed_site, tracked_env, callback),
++                        macro_body,
++                        cfg!(debug_assertions),
++                    );
++                    return res.map_err(crate::PanicMessage::from);
++                }
++                rustc_metadata::ProcMacroKind::Bang { name } if name.as_str() == macro_name => {
++                    let res = client.run1(
++                        &bridge::server::SAME_THREAD,
++                        S::make_server(call_site, def_site, mixed_site, tracked_env, callback),
++                        macro_body,
++                        cfg!(debug_assertions),
++                    );
++                    return res.map_err(crate::PanicMessage::from);
++                }
++                rustc_metadata::ProcMacroKind::Attr { name } if name.as_str() == macro_name => {
++                    let res = client.run2(
++                        &bridge::server::SAME_THREAD,
++                        S::make_server(call_site, def_site, mixed_site, tracked_env, callback),
++                        parsed_attributes,
++                        macro_body,
++                        cfg!(debug_assertions),
++                    );
++                    return res.map_err(crate::PanicMessage::from);
++                }
++                _ => continue,
++            }
++        }
++
++        Err(bridge::PanicMessage::String(format!("proc-macro `{macro_name}` is missing")).into())
++    }
++
++    pub(crate) fn list_macros(&self) -> impl Iterator<Item = (&str, ProcMacroKind)> {
++        self.0.iter().map(|(_client, kind)| match kind {
++            rustc_metadata::ProcMacroKind::CustomDerive { trait_name, .. } => {
++                (trait_name.as_str(), ProcMacroKind::CustomDerive)
++            }
++            rustc_metadata::ProcMacroKind::Bang { name, .. } => {
++                (name.as_str(), ProcMacroKind::Bang)
++            }
++            rustc_metadata::ProcMacroKind::Attr { name, .. } => {
++                (name.as_str(), ProcMacroKind::Attr)
++            }
++        })
++    }
++}
+diff --git a/vendor/proc-macro-srv/crates/proc-macro-srv/src/lib.rs b/vendor/proc-macro-srv/crates/proc-macro-srv/src/lib.rs
+index 2979217..27b6529 100644
+--- a/vendor/proc-macro-srv/crates/proc-macro-srv/src/lib.rs
++++ b/vendor/proc-macro-srv/crates/proc-macro-srv/src/lib.rs
+@@ -10,15 +10,33 @@
+ 
+ #![cfg(feature = "in-rust-tree")]
+ #![feature(proc_macro_internals, proc_macro_diagnostic, proc_macro_span)]
++#![cfg_attr(feature = "native-rustc-loader", feature(rustc_private))]
+ #![expect(internal_features)]
+ #![allow(unused_features, unused_crate_dependencies)]
+ #![deny(deprecated_safe, clippy::undocumented_unsafe_blocks)]
+ #![cfg_attr(test, expect(unreachable_pub))]
+ 
++#[cfg(not(feature = "native-rustc-loader"))]
+ extern crate proc_macro as rustc_proc_macro;
++#[cfg(feature = "native-rustc-loader")]
++extern crate rustc_codegen_ssa;
++#[cfg(feature = "native-rustc-loader")]
++extern crate rustc_driver as _;
++#[cfg(feature = "native-rustc-loader")]
++extern crate rustc_interface;
+ extern crate rustc_lexer;
++#[cfg(feature = "native-rustc-loader")]
++extern crate rustc_metadata;
++#[cfg(feature = "native-rustc-loader")]
++extern crate rustc_proc_macro;
++#[cfg(feature = "native-rustc-loader")]
++extern crate rustc_span;
+ 
+ mod bridge;
++#[cfg(not(feature = "native-rustc-loader"))]
++mod dylib;
++#[cfg(feature = "native-rustc-loader")]
++#[path = "dylib_native.rs"]
+ mod dylib;
+ mod server_impl;
+ mod token_stream;
