@@ -93,25 +93,44 @@ impl Filter {
     }
 }
 
-fn calculate_filters(args: &[String]) -> Vec<Filter> {
+fn calculate_filters(args: &[String]) -> Result<Vec<Filter>, String> {
     let mut filters: Vec<Filter> = vec![];
-    for c in &args[1..] {
+    let mut args = args[1..].iter();
+    while let Some(c) = args.next() {
+        let test_threads = c.strip_prefix("--test-threads=").or_else(|| {
+            (c == "--test-threads").then(|| args.next().map(String::as_str).unwrap_or(""))
+        });
+        if let Some(value) = test_threads {
+            if value != "1" {
+                return Err(format!("only --test-threads=1 is supported, got {value:?}"));
+            }
+            continue;
+        }
         if let Ok(line) = c.parse::<usize>() {
-            filters.last_mut().unwrap().lines.push(line);
+            let Some(last) = filters.last_mut() else {
+                return Err(format!("line filter {line} needs a file filter first"));
+            };
+            last.lines.push(line);
         } else if let Some(stripped) = c.strip_prefix('!') {
             filters.push(Filter::new(stripped, true));
         } else {
             filters.push(Filter::new(c, false));
         }
     }
-    filters
+    Ok(filters)
 }
 
 fn main() -> ExitCode {
     logging_config::setup_logging(None).unwrap();
     run_parse_python_list_tests();
     let cli_args: Vec<String> = env::args().collect();
-    let filters = calculate_filters(&cli_args);
+    let filters = match calculate_filters(&cli_args) {
+        Ok(filters) => filters,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let po = ProjectOptions::new(
         Settings {

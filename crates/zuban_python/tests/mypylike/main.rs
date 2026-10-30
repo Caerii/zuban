@@ -123,6 +123,10 @@ lazy_static::lazy_static! {
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
 struct CliArgs {
+    /// This runner executes cases sequentially; accept libtest's one-thread flag.
+    #[arg(long = "test-threads", value_parser = ["1"])]
+    _test_threads: Option<String>,
+
     /// Will not reuse the database, which disables a hack, but is slower.
     #[arg(long)]
     no_reuse_db: bool,
