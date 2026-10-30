@@ -81,10 +81,13 @@ impl<'x> WorkspacesBuilder<'x> {
             .expect("There should always be a workspace")
     }
 
-    pub fn path_is_contained_in_type_checking_folder(&self, path: &NormalizedPath) -> bool {
-        self.items
-            .iter()
-            .any(|workspace| path.as_ref().starts_with(workspace.root_path.as_ref()))
+    pub fn path_is_relevant_part_in_type_checking_folder(
+        &self,
+        case_sensitive: bool,
+        path: &PathWithScheme,
+    ) -> bool {
+        strip_shortest_path_in_workspace(self.handler, &*self.items, case_sensitive, path)
+            .is_some_and(|(workspace, _)| workspace.kind == WorkspaceKind::TypeChecking)
     }
 }
 
@@ -128,24 +131,13 @@ impl Workspaces {
         }
     }
 
-    fn strip_short_path_in_workspace<'path>(
+    fn strip_shortest_path_in_workspace<'path>(
         &self,
         vfs: &dyn VfsHandler,
         case_sensitive: bool,
         path: &'path PathWithScheme,
     ) -> Option<(Arc<Workspace>, &'path str)> {
-        let mut shortest: Option<(Arc<Workspace>, &'path str)> = None;
-        for workspace in self.items.load().iter() {
-            if let Some(p) = workspace.strip_path_prefix(vfs, case_sensitive, path) {
-                if shortest
-                    .as_ref()
-                    .is_none_or(|(_, shortest)| shortest.len() > p.len())
-                {
-                    shortest = Some((workspace.clone(), p))
-                }
-            }
-        }
-        shortest
+        strip_shortest_path_in_workspace(vfs, &*self.items.load(), case_sensitive, path)
     }
 
     pub fn load(&self) -> LoadedWorkspaces {
@@ -158,7 +150,7 @@ impl Workspaces {
         case_sensitive: bool,
         path: &PathWithScheme,
     ) -> Option<DirOrFile> {
-        self.strip_short_path_in_workspace(vfs, case_sensitive, path)
+        self.strip_shortest_path_in_workspace(vfs, case_sensitive, path)
             .and_then(|(workspace, rest)| workspace.entries.search_path(vfs, self, rest))
             .or_else(|| {
                 self.load().iter().find_map(|workspace| {
@@ -241,7 +233,7 @@ impl Workspaces {
         code: &str,
     ) -> AddedFile {
         if let Some((workspace, rest)) =
-            self.strip_short_path_in_workspace(vfs, case_sensitive, path)
+            self.strip_shortest_path_in_workspace(vfs, case_sensitive, path)
         {
             return ensure_dirs_and_file(
                 Parent::Workspace(Arc::downgrade(&workspace)),
@@ -272,11 +264,15 @@ impl Workspaces {
     ) -> Option<DirectoryEntry> {
         for workspace in self.items.load().iter() {
             if workspace.kind == WorkspaceKind::Fallback {
-                let dir_entry = vfs.read_and_watch_entry(
+                tracing::debug!("Try to ensure fallback for {path:?}");
+                let dir_entry = vfs.read_and_watch_entry_for_invalidation(
                     &*self.items.load(),
+                    // We want this to not be case sensitive, this is a fallback and should
+                    // be read if possible.
                     &path.path,
                     Parent::Workspace(Arc::downgrade(workspace)),
                     &path.path,
+                    false,
                 )?;
                 // We just use the full entry as a name, this is not supposed to be looked up by
                 // anything. It's just a fallback so we have a node to store the entry.
@@ -417,6 +413,26 @@ impl LoadedWorkspaces {
             .filter(|x| x.is_type_checked())
             .map(|x| &x.entries)
     }
+}
+
+fn strip_shortest_path_in_workspace<'path>(
+    vfs: &dyn VfsHandler,
+    workspaces: &[Arc<Workspace>],
+    case_sensitive: bool,
+    path: &'path PathWithScheme,
+) -> Option<(Arc<Workspace>, &'path str)> {
+    let mut shortest: Option<(Arc<Workspace>, &'path str)> = None;
+    for workspace in workspaces.iter() {
+        if let Some(p) = workspace.strip_path_prefix(vfs, case_sensitive, path) {
+            if shortest
+                .as_ref()
+                .is_none_or(|(_, shortest)| shortest.len() > p.len())
+            {
+                shortest = Some((workspace.clone(), p))
+            }
+        }
+    }
+    shortest
 }
 
 #[derive(Debug, Clone)]

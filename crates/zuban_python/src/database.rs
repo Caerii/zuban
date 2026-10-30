@@ -1417,6 +1417,7 @@ impl Database {
             add_workspace_and_check_for_pth_files(
                 &*vfs_handler,
                 &mut workspace_builder,
+                project.flags.case_sensitive,
                 p.clone(),
                 recovery.is_some(),
                 *kind,
@@ -2208,6 +2209,7 @@ impl Database {
 fn add_workspace_and_check_for_pth_files(
     handler: &dyn VfsHandler,
     workspaces_builder: &mut WorkspacesBuilder,
+    case_sensitive: bool,
     path: Arc<NormalizedPath>,
     is_recovery: bool,
     kind: WorkspaceKind,
@@ -2250,8 +2252,10 @@ fn add_workspace_and_check_for_pth_files(
                         // Sometimes pth files link to subfolders of the current workspace. In that
                         // case we want this to still be a type checked (nested) workspace.
                         let kind = if workspaces_builder
-                            .path_is_contained_in_type_checking_folder(&path)
-                        {
+                            .path_is_relevant_part_in_type_checking_folder(
+                                case_sensitive,
+                                &PathWithScheme::with_file_scheme(path.clone()),
+                            ) {
                             WorkspaceKind::TypeChecking
                         } else {
                             WorkspaceKind::SitePackages
@@ -2259,6 +2263,7 @@ fn add_workspace_and_check_for_pth_files(
                         add_workspace_and_check_for_pth_files(
                             handler,
                             workspaces_builder,
+                            case_sensitive,
                             path,
                             is_recovery,
                             kind,

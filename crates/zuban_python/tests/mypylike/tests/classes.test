@@ -2802,6 +2802,22 @@ from io import StringIO
 
 StringIO()
 
+[case abstractmethod_needs_implementation_in_nested_inheritance]
+# From GH #630
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @abstractmethod
+    def m(self) -> None: ...
+
+class Mid(Base): ...
+
+class Leaf(Mid): ...
+
+Base()  # E: Cannot instantiate abstract class "Base" with abstract attribute "m"
+Mid()   # E: Cannot instantiate abstract class "Mid" with abstract attribute "m"
+Leaf()  # E: Cannot instantiate abstract class "Leaf" with abstract attribute "m"
+
 [case no_crash_on_decorated_classmethod]
 # From GH #464
 import model as pa
@@ -2970,3 +2986,13 @@ reveal_type(i1)  # N: Revealed type is "__main__.OrderedItemsView@8"
 # TODO it feels like we don't want to leak the type vars here.
 reveal_type(iter(i1))  # N: Revealed type is "typing.Iterator[K]"
 reveal_type(iter(i2))  # N: Revealed type is "typing.Iterator[K]"
+
+[case classes_type_var_as_protocol_with_recursive_type_matching]
+# From GH #582
+from typing import Protocol
+
+class P(Protocol):
+    a: int
+
+class C[T: P = C]:  # E: TypeVar default must be a subtype of the bound type
+    pass
