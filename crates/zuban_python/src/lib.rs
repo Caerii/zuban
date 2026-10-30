@@ -1122,6 +1122,69 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn tail_type_error_is_rechecked_after_reference_edits() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/tail-error-recovery.py")),
+        );
+        let mut code = String::from("alpha = 1\ndelta = \"text\"\n");
+        for index in 0..1_000 {
+            code.push_str(&format!("name_{index} = {index}\n"));
+        }
+        let tail_line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
+        let tail_start = code.len();
+        code.push_str("alpha + 1\n");
+        let original_code = code;
+        project.store_in_memory_file(path.clone(), original_code.clone().into_boxed_str());
+        assert!(project.document(&path).unwrap().diagnostics().is_empty());
+
+        for (replacement, expected_issues) in [("delta", 1), ("alpha", 0), ("delta", 1)] {
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(tail_line, 0),
+                            Position::new(tail_line, 5),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            let actual = project
+                .document(&path)
+                .unwrap()
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| format!("{diagnostic:?}"))
+                .collect::<Vec<_>>();
+            assert_eq!(actual.len(), expected_issues);
+
+            let mut expected_code = original_code.clone();
+            expected_code.replace_range(tail_start..tail_start + 5, replacement);
+            let mut fresh = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+            fresh.store_in_memory_file(path.clone(), expected_code.into_boxed_str());
+            let expected = fresh
+                .document(&path)
+                .unwrap()
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| format!("{diagnostic:?}"))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
     fn dependency_invalidation_revokes_reference_binding_snapshot() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());

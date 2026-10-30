@@ -520,6 +520,11 @@ fn bench_many_member_conditional_edit(
             ));
         }
     }
+    if diagnostics {
+        // Keep the edit the same width, but make the two names produce different
+        // diagnostics so a stale result cannot make this benchmark look fast.
+        code.push_str(&format!("name_{} = \"text\"\n", count - 2));
+    }
     let line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
     let current = format!("name_{}", count - 1);
     let previous = format!("name_{}", count - 2);
@@ -531,7 +536,7 @@ fn bench_many_member_conditional_edit(
     project.store_in_memory_file(path.clone(), code.into_boxed_str());
     let mut use_previous = false;
     let mut name = if diagnostics {
-        format!("reference edit and diagnostics in {count}-name {count}-member conditional")
+        format!("reference edit and checked diagnostics in {count}-name {count}-member conditional")
     } else {
         format!("reference edit only in {count}-name {count}-member conditional")
     };
@@ -568,7 +573,7 @@ fn bench_many_member_conditional_edit(
             if diagnostics {
                 let mut document = project.document(&path).unwrap();
                 let diagnostics = document.diagnostics();
-                assert!(diagnostics.is_empty());
+                assert_eq!(diagnostics.len(), usize::from(use_previous));
                 std::hint::black_box(diagnostics);
             } else {
                 std::hint::black_box(project.code_of_in_memory_file(&path));

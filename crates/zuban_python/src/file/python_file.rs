@@ -514,14 +514,18 @@ impl<'db> PythonFile {
         end: usize,
         replacement_len: usize,
     ) -> Option<FlowReuseCandidate> {
-        if replacement_len != end - start
-            || !self.has_calculated_diagnostics()
-            || unsafe { self.issues.iter().next().is_some() }
-        {
+        if replacement_len != end - start || !self.has_calculated_diagnostics() {
             return None;
         }
         let (tail_stmt_index, tail_name) = self.replayable_tail_name_stmt()?;
         if tail_name.index() != name_index || tail_stmt_index > name_index {
+            return None;
+        }
+        if !self.issues.only_tail_issues(
+            self.tree.node_start_position(tail_stmt_index),
+            self.tree
+                .node_end_position_without_whitespace(tail_stmt_index),
+        ) {
             return None;
         }
         let snapshot = self.tail_flow_snapshot.read().unwrap().clone()?;
