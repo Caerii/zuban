@@ -167,20 +167,21 @@ impl<'a> ResultContext<'a, '_> {
                             });
                         }
                         // Case x: Iterable[int] = (1, 1)
-                        other
+                        other => {
                             if let Some(matcher) = try_to_match_generics_of_class(
                                 i_s,
                                 i_s.db.python_state.tuple_node_ref(),
                                 &other,
-                            ) =>
-                        {
-                            let generic_t = matcher
-                                .into_type_arg_iterator_or_any(i_s.db)
-                                .next()
-                                .unwrap();
-                            return Some(callable(TupleContextIterator::ArbitraryLen(&generic_t)));
+                            ) {
+                                let generic_t = matcher
+                                    .into_type_arg_iterator_or_any(i_s.db)
+                                    .next()
+                                    .unwrap();
+                                return Some(callable(TupleContextIterator::ArbitraryLen(
+                                    &generic_t,
+                                )));
+                            }
                         }
-                        _ => (),
                     }
                     None
                 },

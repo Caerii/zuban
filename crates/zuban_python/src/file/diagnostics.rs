@@ -2593,14 +2593,20 @@ impl Type {
         match self {
             Type::TypeVar(tv) => check(tv.type_var.variance)
                 .then(|| (variance_to_name(unwanted_variance), "type variable")),
-            Type::Tuple(tup)
-                if let TupleArgs::WithUnpack(w) = &tup.args
-                    && let TupleUnpack::TypeVarTuple(tvt) = &w.unpack =>
-            {
+            Type::Tuple(tup) => {
+                let TupleArgs::WithUnpack(w) = &tup.args else {
+                    return None;
+                };
+                let TupleUnpack::TypeVarTuple(tvt) = &w.unpack else {
+                    return None;
+                };
                 check(tvt.type_var_tuple.variance)
                     .then(|| (variance_to_name(unwanted_variance), "type var tuples"))
             }
-            Type::Callable(c) if let CallableParams::Simple(params) = &c.params => {
+            Type::Callable(c) => {
+                let CallableParams::Simple(params) = &c.params else {
+                    return None;
+                };
                 for p in params.iter() {
                     if let ParamType::Star(StarParamType::ParamSpecArgs(usage)) = &p.type_
                         && for_cls == usage.in_definition
