@@ -950,10 +950,59 @@ index 44ed5d6..f3ac723 100644
      #[test]
      fn a_comment_of_two_slashes_is_one_gnu_as_reads() {
 diff --git a/crates/hir-ty-codegen/cached.rs b/crates/hir-ty-codegen/cached.rs
-index 0459bb1..4118189 100644
+index 0459bb1..e8cdadb 100644
 --- a/crates/hir-ty-codegen/cached.rs
 +++ b/crates/hir-ty-codegen/cached.rs
-@@ -718,8 +718,7 @@ impl Writer {
+@@ -84,7 +84,10 @@ pub(super) struct CachedFunc {
+ pub(super) enum CachedTarget {
+     /// `checked` when the symbol was one of the program's rustc build or of an object blaze
+     /// built before (the standard library's unit), which another program's may lack.
+-    Import { symbol: String, checked: bool },
++    Import {
++        symbol: String,
++        checked: bool,
++    },
+     /// The entry of this name, or whatever else the build has for the instance.
+     Named(String),
+     /// A function of the checkout that is compiled whenever it is called, by its stable name.
+@@ -95,7 +98,13 @@ pub(super) enum CachedTarget {
+     Asm(String),
+     /// rustc's copy `symbol` of the function of the checkout named `name`, which the build
+     /// wants compiled too, as a call of it in a build that links rustc's code has it.
+-    Copy { name: String, symbol: String },
++    Copy {
++        name: String,
++        symbol: String,
++    },
++    /// An unwind helper defined by this object on Windows, rather than linked from rustc.
++    SehResume,
++    SehRelease,
+ }
+ 
+ #[derive(Debug, Serialize, Deserialize, PartialEq)]
+@@ -498,7 +507,9 @@ impl Entry {
+             CachedTarget::Named(_)
+             | CachedTarget::Root(_)
+             | CachedTarget::TypeId(_)
+-            | CachedTarget::Asm(_) => true,
++            | CachedTarget::Asm(_)
++            | CachedTarget::SehResume
++            | CachedTarget::SehRelease => true,
+         });
+         let datas = self.datas.iter().all(|it| match it {
+             CachedData::Static { symbol, .. } => defines(symbol),
+@@ -514,7 +525,9 @@ impl Entry {
+             | CachedTarget::Copy { .. }
+             | CachedTarget::Root(_)
+             | CachedTarget::TypeId(_)
+-            | CachedTarget::Asm(_) => None,
++            | CachedTarget::Asm(_)
++            | CachedTarget::SehResume
++            | CachedTarget::SehRelease => None,
+         })
+     }
+ }
+@@ -718,8 +731,7 @@ impl Writer {
              let queued = Arc::new(Mutex::new(queued));
              // A whole build hands over most of its entries at once, when its last wave is
              // compiled: one thread would write them after the link.
@@ -963,7 +1012,7 @@ index 0459bb1..4118189 100644
              let threads: Vec<_> = (0..count)
                  .map_while(|_| {
                      let mut writer =
-@@ -877,7 +876,7 @@ impl Entries {
+@@ -877,7 +889,7 @@ impl Entries {
      /// from every core in no order, and each read unpacked a block a hundred times the size
      /// of the entry: blaze's own build spent some 1000 s of its threads' time on it.
      pub(super) fn prefetch(&self, names: impl IntoIterator<Item = Arc<str>>) {
@@ -972,6 +1021,15 @@ index 0459bb1..4118189 100644
          let tally = super::backend::Tally::global();
          let mut seen: FxHashSet<Arc<str>> = FxHashSet::default();
          let mut wave: Vec<Arc<str>> =
+@@ -1124,6 +1136,8 @@ mod tests {
+             CachedTarget::Root("case::edited".to_owned()),
+             CachedTarget::TypeId(7 << 100),
+             CachedTarget::Asm("nop".to_owned()),
++            CachedTarget::SehResume,
++            CachedTarget::SehRelease,
+             CachedTarget::Copy {
+                 name: "case::small".to_owned(),
+                 symbol: "_RNvCs1_4case5small".to_owned(),
 diff --git a/crates/hir-ty-codegen/debuginfo.rs b/crates/hir-ty-codegen/debuginfo.rs
 index d33f29e..b0b2053 100644
 --- a/crates/hir-ty-codegen/debuginfo.rs
@@ -985,8 +1043,25 @@ index d33f29e..b0b2053 100644
          let mut contexts = vec![];
          if let DebugContext::Dwarf(dwarf) = &context
              && elf
+diff --git a/crates/hir-ty-codegen/later.rs b/crates/hir-ty-codegen/later.rs
+index 2d01e58..a8759e9 100644
+--- a/crates/hir-ty-codegen/later.rs
++++ b/crates/hir-ty-codegen/later.rs
+@@ -505,6 +505,12 @@ impl<'db> Keeper<'_, 'db> {
+                 }
+             } else if let FuncTarget::Asm(text) = &request.target {
+                 CachedTarget::Asm(text.clone())
++            } else if let FuncTarget::Symbol(symbol) = &request.target {
++                match symbol.as_str() {
++                    unwind::seh::RESUME => CachedTarget::SehResume,
++                    unwind::seh::RELEASE => CachedTarget::SehRelease,
++                    _ => return self.kept.unkept("call of unresolved symbol"),
++                }
+             } else {
+                 return self.kept.unkept("call of no instance");
+             };
 diff --git a/crates/hir-ty-codegen/mod.rs b/crates/hir-ty-codegen/mod.rs
-index c07f25e..f28b621 100644
+index c07f25e..21a3328 100644
 --- a/crates/hir-ty-codegen/mod.rs
 +++ b/crates/hir-ty-codegen/mod.rs
 @@ -99,6 +99,7 @@ use hir_ty_mir::mir::{
@@ -1024,6 +1099,27 @@ index c07f25e..f28b621 100644
              self.symbols.in_parallel(threads.min(parts.len()), &work);
          }
          for (part, made) in parts.iter().zip(made) {
+@@ -6564,6 +6565,20 @@ impl<'a, 'db> ObjectCodegen<'a, 'db> {
+         for func in &entry.funcs {
+             ids.funcs.push(match &func.target {
+                 CachedTarget::Import { symbol, .. } => self.import(symbol, &func.sig)?,
++                CachedTarget::SehResume | CachedTarget::SehRelease => {
++                    let symbol = match &func.target {
++                        CachedTarget::SehResume => unwind::seh::RESUME,
++                        _ => unwind::seh::RELEASE,
++                    };
++                    let Some(id) = self
++                        .unwind
++                        .runtime(&mut self.module, symbol)
++                        .map_err(CodegenError::Backend)?
++                    else {
++                        unsupported!("an entry calls a Windows unwind helper on another target");
++                    };
++                    id
++                }
+                 CachedTarget::Asm(text) => self.assembly(text, &func.sig)?,
+                 CachedTarget::TypeId(hash) => self.type_id_shim(&func.sig, *hash)?,
+                 CachedTarget::Root(callee) => {
 diff --git a/crates/hir-ty-codegen/units.rs b/crates/hir-ty-codegen/units.rs
 index 0698369..ee69680 100644
 --- a/crates/hir-ty-codegen/units.rs

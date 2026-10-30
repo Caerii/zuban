@@ -128,10 +128,31 @@ load takes another 10.2 seconds. The full warm command takes 318.860 seconds;
 the first patch-ready compilation, not daemon launch alone, is its largest cost.
 The first run takes 275.424 seconds for the corresponding warm command.
 
-For these two runs, the extra warm cost over Cargo is about 274-295 seconds.
+An October 30 follow-up makes the two Windows SEH unwind helpers explicit
+cache targets. They are local functions in the generated object, so storing
+them as ordinary imports would be incorrect. The cache now records each helper
+separately and recreates it when an entry is stitched into a new object. Other
+unresolved local symbols remain uncached.
+
+| Zuban executable build with this cache change | Result |
+| --- | --- |
+| Cold build, new engine identity | Passed in 539.67 seconds; 130,191 entries stored, zero unresolved-symbol misses in the application phase |
+| Restarted daemon, same source | Passed in 148.52 seconds; 130,191 of 130,192 functions reused, one compiled |
+| Produced executable | `zuban --version` returned `zuban 0.10.1` in a 0.26-second already-warm build |
+| Earlier diagnostic engine restart | 265.39 seconds; 61,271 functions reused and 68,921 compiled |
+
+The restart measurements were on the same machine but in separate runs under
+different host conditions. The function reuse counts establish the cache
+effect; the wall times are indicative rather than a controlled speedup ratio.
+This is a build-developer improvement, not a measured change to the sandbox
+runtime's Zuban analysis latency or its alpha workflow.
+
+For the earlier, pre-SEH-cache runs, the extra warm cost over Cargo was about
+274-295 seconds.
 The observed edit plus revert saves about 34-37 seconds per pair, so roughly
-eight such pairs would amortize one daemon restart if later pairs kept the same
-timings. This is arithmetic from two pairs, not a measured long-session result.
+eight such pairs would have amortized one daemon restart if later pairs kept
+the same timings. This is historical arithmetic from two pairs, not a measured
+long-session result; the new cache changes the restart cost.
 Keeping the daemon alive during an active editing session avoids repeatedly
 paying the warm cost, at the expense of its memory use. Stop it when the session
 ends. Windows currently has no `Client::nobody()` background build, but moving
