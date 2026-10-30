@@ -1290,6 +1290,74 @@ mod lsp_edit_tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
         #[test]
+        fn repeated_tail_errors_match_fresh_analysis(
+            count in 600usize..651,
+            conditional_defs in any::<bool>(),
+            prefix_error in any::<bool>(),
+            tail_kind in 0usize..3,
+        ) {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let mut project = test_project::new(options.clone());
+            let vfs = project.vfs_handler();
+            let path = PathWithScheme::with_file_scheme(
+                vfs.normalize_rc_path(vfs.unchecked_abs_path("/property-tail-error-recovery.py")),
+            );
+            let mut code = String::from(
+                "alpha = 1\ndelta = 'text'\nclass Box:\n    value: int = 2\nbox = Box()\n",
+            );
+            if conditional_defs {
+                code.push_str("guard = bool(1)\nif guard:\n    branch_value = 2\nelse:\n    branch_value = 3\n");
+            } else {
+                code.push_str("branch_value = 2\n");
+            }
+            for index in 0..count {
+                code.push_str(&format!("name_{index} = {index}\n"));
+            }
+            if prefix_error {
+                code.push_str("wrong: int = 'bad'\n");
+            }
+            let tail_line = code.bytes().filter(|&byte| byte == b'\n').count() as u32;
+            let tail_start = code.len();
+            let suffix = match tail_kind {
+                0 => " + 1\n",
+                1 => " + branch_value\n",
+                _ => " + box.value\n",
+            };
+            code.push_str("alpha");
+            code.push_str(suffix);
+            project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+            let _ = project.document(&path).unwrap().diagnostics();
+
+            for replacement in ["delta", "alpha", "delta", "alpha"] {
+                project.store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(tail_line, 0),
+                            Position::new(tail_line, 5),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                ).unwrap();
+                let mut expected_code = code.clone();
+                expected_code.replace_range(tail_start..tail_start + 5, replacement);
+                let mut fresh = test_project::new(options.clone());
+                fresh.store_in_memory_file(path.clone(), expected_code.into_boxed_str());
+                prop_assert_eq!(
+                    format!("{:?}", project.document(&path).unwrap().diagnostics()),
+                    format!("{:?}", fresh.document(&path).unwrap().diagnostics()),
+                );
+            }
+        }
+
+        #[test]
         fn conditional_name_edit_matches_fresh_analysis(
             count in 120usize..151,
             string_else in any::<bool>(),
