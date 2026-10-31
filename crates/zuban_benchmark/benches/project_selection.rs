@@ -1,12 +1,18 @@
-use config::ProjectOptions;
+use config::{ExcludeRegex, ProjectOptions};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use vfs::{LocalFS, PathWithScheme, VfsHandler};
 use zuban_python::{Project, RunCause};
 
-fn selection_case(c: &mut Criterion, count: usize, deep: bool) {
+fn selection_case(c: &mut Criterion, count: usize, deep: bool, exclude: bool) {
     let mut options = ProjectOptions::default();
     options.settings.typeshed_path = Some(test_utils::typeshed_path());
     options.settings.add_global_packages_default = false;
+    if exclude {
+        options
+            .flags
+            .excludes
+            .push(ExcludeRegex::new("never-match-this-file".into()).unwrap());
+    }
     let fs = LocalFS::without_watcher();
     options
         .settings
@@ -34,7 +40,11 @@ fn selection_case(c: &mut Criterion, count: usize, deep: bool) {
     let mut group = c.benchmark_group("cached project selection");
     group.throughput(Throughput::Elements(count as u64));
     group.bench_function(
-        format!("{count} files {}", if deep { "deep" } else { "shallow" }),
+        format!(
+            "{count} files {}{}",
+            if deep { "deep" } else { "shallow" },
+            if exclude { " with exclude" } else { "" }
+        ),
         |b| {
             b.iter(|| {
                 let diagnostics = project.diagnostics().unwrap();
@@ -49,9 +59,10 @@ fn selection_case(c: &mut Criterion, count: usize, deep: bool) {
 
 fn project_selection(c: &mut Criterion) {
     for count in [1, 1_000] {
-        selection_case(c, count, false);
-        selection_case(c, count, true);
+        selection_case(c, count, false, false);
+        selection_case(c, count, true, false);
     }
+    selection_case(c, 1_000, true, true);
 }
 
 criterion_group!(benches, project_selection);

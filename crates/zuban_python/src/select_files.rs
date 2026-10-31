@@ -274,8 +274,10 @@ impl<'db> FileSelector<'db> {
 
         match entry {
             DirectoryEntry::File(file) => {
-                let path = file.relative_path(handler);
-                if !should_skip_file(&self.db.project.flags, &path)
+                let flags = &self.db.project.flags;
+                if is_file_with_python_ending(&file.name)
+                    && (flags.excludes.is_empty()
+                        || !should_skip_dir_or_file(flags, &file.relative_path(handler)))
                     && !ignore_py_if_overwritten_by_pyi(parent_entries, file)
                     && !self.ignored_by_gitignore(|| file.absolute_path(handler), false)
                 {
@@ -283,8 +285,9 @@ impl<'db> FileSelector<'db> {
                 }
             }
             DirectoryEntry::Directory(dir) => {
-                let path = dir.relative_path(handler);
-                if !should_skip_dir_or_file(&self.db.project.flags, &path)
+                let flags = &self.db.project.flags;
+                if (flags.excludes.is_empty()
+                    || !should_skip_dir_or_file(flags, &dir.relative_path(handler)))
                     && !self.ignored_by_gitignore(|| dir.absolute_path(handler), true)
                     // Nested workspaces are handled by checking the other workspaces
                     && !dir.is_nested_workspace()
@@ -370,4 +373,57 @@ fn find_imports_and_preload_files(
             //find_imports_and_preload_files(db, file, loaded_file_entries)
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use config::{ExcludeRegex, ProjectOptions};
+    use vfs::{LocalFS, PathWithScheme, VfsHandler};
+
+    use crate::{Project, RunCause};
+
+    #[test]
+    fn project_selection_respects_exclusions_and_python_file_types() {
+        for excluded in [false, true] {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let fs = LocalFS::without_watcher();
+            options
+                .settings
+                .mypy_path
+                .push(fs.normalize_rc_path(fs.unchecked_abs_path("/selection-regression")));
+            if excluded {
+                options
+                    .flags
+                    .excludes
+                    .push(ExcludeRegex::new(r"skip\.py$|ignored_dir(?:[/\\]|$)".into()).unwrap());
+            }
+            let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+            let vfs = project.vfs_handler();
+            let files = [
+                ("keep.py", "value: int = 'bad'\n"),
+                ("skip.py", "value: int = 'bad'\n"),
+                ("ignored_dir/nested.py", "value: int = 'bad'\n"),
+                ("same.py", "value: int = 'bad'\n"),
+                ("same.pyi", "value: int\n"),
+                ("notes.txt", "value: int = 'bad'\n"),
+            ]
+            .into_iter()
+            .map(|(name, code)| {
+                let path = format!("/selection-regression/{name}");
+                (
+                    PathWithScheme::with_file_scheme(
+                        vfs.normalize_rc_path(vfs.unchecked_abs_path(&path)),
+                    ),
+                    code.into(),
+                )
+            })
+            .collect();
+            project.store_in_memory_files(files);
+            let diagnostics = project.diagnostics().unwrap();
+            assert_eq!(diagnostics.checked_files, if excluded { 2 } else { 4 });
+            assert_eq!(diagnostics.issues.len(), if excluded { 1 } else { 3 });
+        }
+    }
 }
