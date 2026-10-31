@@ -2807,7 +2807,15 @@ mod tests {
             vfs.normalize_rc_path(vfs.unchecked_abs_path("/diagnostic-offsets.py")),
         );
         let source = "first: 'MissingFirst' = 1\nmiddle: int = 'wrong'\nlast: 'MissingLast' = 2\n";
-        project.store_in_memory_file(path, source.into());
+        project.store_in_memory_file(path.clone(), source.into());
+        {
+            let mut document = project.document(&path).unwrap();
+            let issues = document.diagnostics();
+            assert!(issues.len() >= 3);
+            assert!(issues.windows(2).all(|pair| {
+                pair[0].start_position().byte_position <= pair[1].start_position().byte_position
+            }));
+        }
         let diagnostics = project.diagnostics().unwrap();
         assert!(diagnostics.issues.len() >= 3);
         assert!(diagnostics.issues.iter().any(|issue| {

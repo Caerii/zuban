@@ -444,7 +444,7 @@ impl File for PythonFile {
             let file = db.loaded_python_file(*file_index);
             vec.extend(file.diagnostics(db).into_vec().into_iter());
         }
-        vec.sort_by_key(|diag| diag.issue.start_position);
+        vec.sort_by_key(|diag| diag.start_byte_position());
         vec.into_boxed_slice()
     }
 }
