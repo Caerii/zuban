@@ -244,7 +244,11 @@ impl<'db> FileSelector<'db> {
         let order_index = self.order_counter;
         self.order_counter += 1;
         if let Some(file_index) = file.get_file_index() {
-            self.add_file_index(order_index, file_index)
+            self.file_indexes_to_order_map
+                .get_mut()
+                .unwrap()
+                .entry(file_index)
+                .or_insert(order_index);
         } else {
             let path = file.absolute_path(&*self.db.vfs.handler);
             self.to_be_loaded.push((order_index, file, path));
