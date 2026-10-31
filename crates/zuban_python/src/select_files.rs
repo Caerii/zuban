@@ -18,14 +18,48 @@ use crate::{
 type ToBeLoaded = (usize, Arc<FileEntry>);
 type OrderedFileIndexes = FastHashMap<FileIndex, usize>;
 
+pub(crate) struct SelectionCache {
+    epoch: u64,
+    files: Vec<FileIndex>,
+}
+
 pub(crate) fn diagnostics_for_relevant_files<'db>(
     db: &'db Database,
+    cache: &mut Option<SelectionCache>,
     mut on_file: impl FnMut(&'db PythonFile) -> Vec<Diagnostic<'db>>,
 ) -> anyhow::Result<Vec<Diagnostic<'db>>> {
-    let files = FileSelector::find_files(db)?;
+    let epoch = db.vfs.structure_epoch();
+    if !cache.as_ref().is_some_and(|cache| {
+        cache.epoch == epoch
+            && cache
+                .files
+                .iter()
+                .all(|&index| db.vfs.file(index).is_some())
+    }) {
+        let files = FileSelector::find_files(db)?
+            .into_iter()
+            .map(|item| item.file.file_index)
+            .collect();
+        *cache = Some(SelectionCache {
+            epoch: db.vfs.structure_epoch(),
+            files,
+        });
+    }
+    // File-specific flags can change on a content edit without changing the
+    // workspace structure, so cache candidates rather than filtered results.
+    let files = &cache.as_ref().unwrap().files;
     Ok(files
-        .into_iter()
-        .map(|o| on_file(o.file))
+        .iter()
+        .map(|&index| db.loaded_python_file(index))
+        .filter(|file| {
+            if let Some(flags) = file.maybe_more_specific_flags(db) {
+                let path = file.file_entry(db).relative_path(&*db.vfs.handler);
+                !should_skip_file(flags, &path)
+            } else {
+                true
+            }
+        })
+        .map(&mut on_file)
         .reduce(|mut vec1, vec2| {
             vec1.extend(vec2);
             vec1
@@ -98,7 +132,6 @@ impl<'db> FileSelector<'db> {
                     find_imports_and_preload_files(db, file, &loaded_file_entries)
                 }
             });
-        let vfs_handler = &*db.vfs.handler;
         let mut vec: Vec<_> = selector
             .file_indexes_to_order_map
             .into_inner()
@@ -107,18 +140,6 @@ impl<'db> FileSelector<'db> {
             .map(|(file_index, order_index)| OrderableFile {
                 order_index,
                 file: db.loaded_python_file(file_index),
-            })
-            // TODO shouldn't this be done before name binding?
-            .filter(|o| {
-                if let Some(more_specific_flags) = o.file.maybe_more_specific_flags(db) {
-                    // We need to recheck, because we might have more specific information now for this
-                    // file now that it's parsed.
-                    let p = o.file.file_entry(db).relative_path(vfs_handler);
-                    if should_skip_file(more_specific_flags, &p) {
-                        return false;
-                    }
-                }
-                true
             })
             .collect();
         vec.sort_by_key(|o| o.order_index);
@@ -429,6 +450,48 @@ mod tests {
 
     use super::FileSelector;
     use crate::{Project, RunCause};
+
+    #[test]
+    fn cached_selection_tracks_edits_and_stub_additions_and_removals() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let fs = LocalFS::without_watcher();
+        options
+            .settings
+            .mypy_path
+            .push(fs.normalize_rc_path(fs.unchecked_abs_path("/selection-cache-regression")));
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let make_path = |name: &str| {
+            PathWithScheme::with_file_scheme(fs.normalize_rc_path(
+                fs.unchecked_abs_path(&format!("/selection-cache-regression/{name}")),
+            ))
+        };
+        let a = make_path("a.py");
+        let b = make_path("b.py");
+        let stub = make_path("a.pyi");
+        project.store_in_memory_files(vec![
+            (a.clone(), "value: int = 'bad'\n".into()),
+            (b, "value: int = 'bad'\n".into()),
+        ]);
+        for _ in 0..2 {
+            let diagnostics = project.diagnostics().unwrap();
+            assert_eq!(diagnostics.checked_files, 2);
+            assert_eq!(diagnostics.issues.len(), 2);
+        }
+        project.store_in_memory_file(a, "value: int = 1\n".into());
+        let diagnostics = project.diagnostics().unwrap();
+        assert_eq!(diagnostics.checked_files, 2);
+        assert_eq!(diagnostics.issues.len(), 1);
+        project.store_in_memory_file(stub.clone(), "value: int = 'bad'\n".into());
+        let diagnostics = project.diagnostics().unwrap();
+        assert_eq!(diagnostics.checked_files, 2);
+        assert_eq!(diagnostics.issues.len(), 2);
+        project.discard_in_memory_files(&[stub]);
+        let diagnostics = project.diagnostics().unwrap();
+        assert_eq!(diagnostics.checked_files, 2);
+        assert_eq!(diagnostics.issues.len(), 1);
+    }
 
     #[test]
     fn duplicate_file_indices_keep_the_earliest_discovery_order() {

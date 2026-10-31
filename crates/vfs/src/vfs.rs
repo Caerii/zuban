@@ -63,6 +63,11 @@ enum InMemoryKind {
 }
 
 impl<F: VfsFile> Vfs<F> {
+    /// Changes when cached workspace structure may no longer be valid.
+    pub fn structure_epoch(&self) -> u64 {
+        self.structure_epoch.load(Ordering::Relaxed)
+    }
+
     fn advance_structure_epoch(&self) -> u64 {
         self.structure_epoch.fetch_add(1, Ordering::Relaxed) + 1
     }

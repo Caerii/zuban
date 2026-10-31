@@ -69,6 +69,7 @@ use crate::{
 
 pub struct Project {
     db: Database,
+    selection_cache: Option<select_files::SelectionCache>,
 }
 
 impl Project {
@@ -80,7 +81,10 @@ impl Project {
     fn new_internal(db: Database) -> Self {
         tracing::debug!("Project run cause: {:#?}", &db.run_cause);
         tracing::debug!("Project settings: {:#?}", &db.project);
-        Self { db }
+        Self {
+            db,
+            selection_cache: None,
+        }
     }
 
     pub fn from_recovery(
@@ -89,7 +93,10 @@ impl Project {
         recovery: PanicRecovery,
     ) -> Self {
         let db = Database::from_recovery(vfs, options, recovery.run_cause, recovery.vfs);
-        Self { db }
+        Self {
+            db,
+            selection_cache: None,
+        }
     }
 
     pub fn without_watcher(options: ProjectOptions, cause: RunCause) -> Self {
@@ -318,14 +325,18 @@ impl Project {
         let mut checked_files = 0;
         let mut files_with_errors = 0;
 
-        let issues = select_files::diagnostics_for_relevant_files(&self.db, |file| {
-            checked_files += 1;
-            let issues = file.diagnostics(&self.db).into_vec();
-            if !issues.is_empty() {
-                files_with_errors += 1;
-            }
-            issues
-        })?;
+        let issues = select_files::diagnostics_for_relevant_files(
+            &self.db,
+            &mut self.selection_cache,
+            |file| {
+                checked_files += 1;
+                let issues = file.diagnostics(&self.db).into_vec();
+                if !issues.is_empty() {
+                    files_with_errors += 1;
+                }
+                issues
+            },
+        )?;
         tracing::info!("Checked {checked_files} files ({files_with_errors} files had errors)");
         Ok(Diagnostics {
             checked_files,
@@ -339,8 +350,12 @@ impl Project {
     /// stable. We would have to ensure first it works everywhere.
     /// Resource reuse across projects needs separate validation before general use.
     pub fn try_to_reuse_project_resources_for_tests(&mut self, options: ProjectOptions) -> Self {
+        self.selection_cache = None;
         let db = self.db.try_to_reuse_project_resources_for_tests(options);
-        Project { db }
+        Project {
+            db,
+            selection_cache: None,
+        }
     }
 
     pub fn document(&mut self, path: &PathWithScheme) -> Option<Document<'_>> {
