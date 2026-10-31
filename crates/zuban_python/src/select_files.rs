@@ -260,6 +260,7 @@ impl<'db> FileSelector<'db> {
             .write()
             .unwrap()
             .entry(file_index)
+            .and_modify(|existing| *existing = (*existing).min(order_index))
             .or_insert(order_index);
     }
 
@@ -425,9 +426,24 @@ fn find_imports_and_preload_files(
 #[cfg(test)]
 mod tests {
     use config::{ExcludeRegex, ProjectOptions};
-    use vfs::{LocalFS, PathWithScheme, VfsHandler};
+    use vfs::{FileIndex, LocalFS, PathWithScheme, VfsHandler};
 
+    use super::FileSelector;
     use crate::{Project, RunCause};
+
+    #[test]
+    fn duplicate_file_indices_keep_the_earliest_discovery_order() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let project = Project::without_watcher(options, RunCause::TypeChecking);
+        let selector = FileSelector::new(&project.db);
+        let file = FileIndex(1);
+        selector.add_file_index(9, file);
+        selector.add_file_index(2, file);
+        selector.add_file_index(5, file);
+        assert_eq!(selector.file_indexes_to_order_map.read().unwrap()[&file], 2);
+    }
 
     #[test]
     fn project_selection_respects_exclusions_and_python_file_types() {
