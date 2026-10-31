@@ -855,6 +855,7 @@ impl<F: VfsFile> Vfs<F> {
                                 tracing::debug!(
                                     "Decided to replace nothing in VFS, because nothing changed"
                                 );
+                                ignored_invalidation = true;
                             } else {
                                 tracing::debug!("Decided to replace {replace_name} in VFS");
                                 to_replace.walk_entries(self, &mut |e| {

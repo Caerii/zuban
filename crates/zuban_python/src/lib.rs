@@ -1942,6 +1942,44 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn unchanged_disk_file_event_preserves_validated_buffers() {
+        let temp = tempfile::tempdir().unwrap();
+        let disk_file = temp.path().join("on_disk.py");
+        std::fs::write(&disk_file, "x: int = 1\n").unwrap();
+        let fs = LocalFS::without_watcher();
+        let root = fs.unchecked_abs_path(temp.path().to_str().unwrap());
+        let disk_path = fs.unchecked_abs_path(disk_file.to_str().unwrap());
+        let overlay = PathWithScheme::with_file_scheme(fs.normalize_rc_path(
+            fs.unchecked_abs_path(temp.path().join("open.py").to_str().unwrap()),
+        ));
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        options.settings.mypy_path.push(fs.normalize_rc_path(root));
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        assert!(project.diagnostics().unwrap().issues.is_empty());
+        project.store_in_memory_file(overlay.clone(), "y = 2\n".into());
+        project.invalidate_path(&disk_path);
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&overlay, "y = 2\n")
+                .is_some()
+        );
+        std::fs::write(&disk_file, "x: int = 'bad'\n").unwrap();
+        project.invalidate_path(&disk_path);
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&overlay, "y = 2\n")
+                .is_none()
+        );
+        assert_eq!(project.diagnostics().unwrap().issues.len(), 1);
+    }
+
+    #[test]
     fn ignored_directory_event_preserves_validated_buffers() {
         let temp = tempfile::tempdir().unwrap();
         let child = temp.path().join("child");
