@@ -42,6 +42,22 @@ bash scripts/install-locally.sh
 
 Note that your build will not properly work if submodules are not cloned.
 
+### Faster test rebuilds on Windows
+
+For a full, single-threaded development test run with less optimization during
+compilation, run `./scripts/test-fast.ps1`. This runs the same Cargo test suite
+with debug assertions and overflow checks enabled; it does not replace the normal
+`cargo test`, `cargo fmt --check`, and `cargo check --all-targets` checks.
+The first unoptimized build needs its own compiled artifacts, and the tests run
+more slowly, so this mode is most useful when iterating on compiled Rust code.
+
+On one Windows host, a warm compiled-code edit to the `zuban_python` library
+test target rebuilt in 8.7 seconds with this setting versus 134.7 seconds with
+the standard optimized test profile, using one Cargo job in both cases. These
+are single measurements for one edit, not a promise for other changes. In one
+complete run, the two unoptimized mypy-like passes took 28.9 and 19.1 seconds;
+the corresponding optimized passes in another run took 7.5 and 9.3 seconds.
+
 ## License
 
 This project is dual licensed:
