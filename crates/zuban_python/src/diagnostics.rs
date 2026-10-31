@@ -2806,7 +2806,7 @@ mod tests {
         let path = PathWithScheme::with_file_scheme(
             vfs.normalize_rc_path(vfs.unchecked_abs_path("/diagnostic-offsets.py")),
         );
-        let source = "first: 'MissingFirst' = 1\nmiddle: int = 'wrong'\nlast: 'MissingLast' = 2\n";
+        let source = "first: 'MissingFirst' = 1\nmiddle: int = 'wrong'\nlast: 'MissingLast' = 2\ncomposite: 'tuple[MissingLeft, MissingRight]' = ()\n";
         project.store_in_memory_file(path.clone(), source.into());
         {
             let mut document = project.document(&path).unwrap();
@@ -2830,7 +2830,7 @@ mod tests {
                 issue.start_position().byte_position
             );
         }
-        for name in ["MissingFirst", "MissingLast"] {
+        for name in ["MissingFirst", "MissingLast", "MissingLeft", "MissingRight"] {
             let expected = source.find(name).unwrap();
             assert!(
                 diagnostics

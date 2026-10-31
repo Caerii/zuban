@@ -419,31 +419,8 @@ impl File for PythonFile {
     }
 
     fn diagnostics<'db>(&'db self, db: &'db Database) -> Box<[Diagnostic<'db>]> {
-        if self
-            .super_file
-            .is_some_and(|super_file| super_file.ignore_diagnostics)
-        {
-            return Default::default();
-        }
-        if self
-            .super_file
-            .is_none_or(|super_file| !super_file.is_part_of_parent())
-        {
-            // The main file is responsible for calculating diagnostics of type comments,
-            // annotation strings, etc.
-            let result = self.ensure_calculated_diagnostics(db);
-            debug_assert!(result.is_ok());
-        }
-        let mut vec: Vec<_> = unsafe {
-            self.issues
-                .iter()
-                .map(|i| Diagnostic::new(db, self, i))
-                .collect()
-        };
-        for (_, file_index) in self.sub_files.in_same_file.read().unwrap().iter() {
-            let file = db.loaded_python_file(*file_index);
-            vec.extend(file.diagnostics(db).into_vec().into_iter());
-        }
+        let mut vec = Vec::new();
+        self.collect_diagnostics(db, &mut vec);
         vec.sort_by_key(|diag| diag.start_byte_position());
         vec.into_boxed_slice()
     }
@@ -503,6 +480,34 @@ impl fmt::Debug for PythonFile {
 }
 
 impl<'db> PythonFile {
+    fn collect_diagnostics(&'db self, db: &'db Database, result: &mut Vec<Diagnostic<'db>>) {
+        if self
+            .super_file
+            .is_some_and(|parent| parent.ignore_diagnostics)
+        {
+            return;
+        }
+        if self
+            .super_file
+            .is_none_or(|parent| !parent.is_part_of_parent())
+        {
+            // The main file calculates diagnostics for embedded annotations and comments.
+            let calculated = self.ensure_calculated_diagnostics(db);
+            debug_assert!(calculated.is_ok());
+        }
+        unsafe {
+            result.extend(
+                self.issues
+                    .iter()
+                    .map(|issue| Diagnostic::new(db, self, issue)),
+            );
+        }
+        for (_, file_index) in self.sub_files.in_same_file.read().unwrap().iter() {
+            db.loaded_python_file(*file_index)
+                .collect_diagnostics(db, result);
+        }
+    }
+
     pub(crate) fn source_file_and_offset(
         &'db self,
         db: &'db Database,

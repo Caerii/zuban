@@ -3,7 +3,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use vfs::PathWithScheme;
 use zuban_python::{Project, RunCause};
 
-fn diagnostic_order(c: &mut Criterion) {
+fn diagnostic_order_case(c: &mut Criterion, embedded: bool) {
     const ERRORS: usize = 1_000;
     let mut options = ProjectOptions::default();
     options.settings.typeshed_path = Some(test_utils::typeshed_path());
@@ -15,14 +15,23 @@ fn diagnostic_order(c: &mut Criterion) {
     );
     let mut code = String::new();
     for index in 0..ERRORS {
-        code.push_str(&format!("value_{index}: int = 'not an integer'\n"));
+        if embedded {
+            code.push_str(&format!("value_{index}: 'MissingType{index}' = 1\n"));
+        } else {
+            code.push_str(&format!("value_{index}: int = 'not an integer'\n"));
+        }
     }
     project.store_in_memory_file(path, code.into_boxed_str());
     assert_eq!(project.diagnostics().unwrap().issues.len(), ERRORS);
 
     let mut group = c.benchmark_group("cached project diagnostics");
     group.throughput(Throughput::Elements(ERRORS as u64));
-    group.bench_function("1000 errors", |b| {
+    let name = if embedded {
+        "1000 embedded annotation errors"
+    } else {
+        "1000 errors"
+    };
+    group.bench_function(name, |b| {
         b.iter(|| {
             let diagnostics = project.diagnostics().unwrap();
             assert_eq!(diagnostics.issues.len(), ERRORS);
@@ -30,6 +39,11 @@ fn diagnostic_order(c: &mut Criterion) {
         });
     });
     group.finish();
+}
+
+fn diagnostic_order(c: &mut Criterion) {
+    diagnostic_order_case(c, false);
+    diagnostic_order_case(c, true);
 }
 
 criterion_group!(benches, diagnostic_order);
