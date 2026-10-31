@@ -26,31 +26,50 @@ pub(crate) struct SelectionCache {
 pub(crate) fn diagnostics_for_relevant_files<'db>(
     db: &'db Database,
     cache: &mut Option<SelectionCache>,
-    mut on_file: impl FnMut(&'db PythonFile) -> Vec<Diagnostic<'db>>,
+    on_file: impl FnMut(&'db PythonFile) -> Vec<Diagnostic<'db>>,
 ) -> anyhow::Result<Vec<Diagnostic<'db>>> {
     let epoch = db.vfs.structure_epoch();
-    if !cache.as_ref().is_some_and(|cache| {
-        cache.epoch == epoch
-            && cache
-                .files
-                .iter()
-                .all(|&index| db.vfs.file(index).is_some())
-    }) {
-        let files = FileSelector::find_files(db)?
+    if let Some(cache) = cache.as_ref()
+        && cache.epoch == epoch
+        && let [index] = cache.files.as_slice()
+        && let Some(file) = db.vfs.file(*index)
+    {
+        return Ok(diagnostics_for_selected_files(
+            db,
+            std::iter::once(file),
+            on_file,
+        ));
+    }
+    let mut files = cache
+        .as_ref()
+        .filter(|cache| cache.epoch == epoch)
+        .and_then(|cache| db.vfs.loaded_files(&cache.files));
+    if files.is_none() {
+        let indexes = FileSelector::find_files(db)?
             .into_iter()
             .map(|item| item.file.file_index)
             .collect();
         *cache = Some(SelectionCache {
             epoch: db.vfs.structure_epoch(),
-            files,
+            files: indexes,
         });
+        files = db.vfs.loaded_files(&cache.as_ref().unwrap().files);
     }
     // File-specific flags can change on a content edit without changing the
     // workspace structure, so cache candidates rather than filtered results.
-    let files = &cache.as_ref().unwrap().files;
-    Ok(files
-        .iter()
-        .map(|&index| db.loaded_python_file(index))
+    Ok(diagnostics_for_selected_files(
+        db,
+        files.expect("selected files must be loaded").into_iter(),
+        on_file,
+    ))
+}
+
+fn diagnostics_for_selected_files<'db>(
+    db: &'db Database,
+    files: impl Iterator<Item = &'db PythonFile>,
+    mut on_file: impl FnMut(&'db PythonFile) -> Vec<Diagnostic<'db>>,
+) -> Vec<Diagnostic<'db>> {
+    files
         .filter(|file| {
             if let Some(flags) = file.maybe_more_specific_flags(db) {
                 let path = file.file_entry(db).relative_path(&*db.vfs.handler);
@@ -64,7 +83,7 @@ pub(crate) fn diagnostics_for_relevant_files<'db>(
             vec1.extend(vec2);
             vec1
         })
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 pub(crate) fn all_typechecked_files(db: &Database) -> (OrderedFileIndexes, Vec<ToBeLoaded>) {

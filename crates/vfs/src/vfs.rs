@@ -344,6 +344,15 @@ impl<F: VfsFile> Vfs<F> {
         self.files.get(index.0 as usize).unwrap().file()
     }
 
+    /// Returns all loaded files in the requested order, or none if any is unavailable.
+    pub fn loaded_files(&self, indexes: &[FileIndex]) -> Option<Vec<&F>> {
+        self.files
+            .get_many(indexes.iter().map(|index| index.0 as usize))?
+            .into_iter()
+            .map(|state| state.file())
+            .collect()
+    }
+
     pub fn file_mut(&mut self, index: FileIndex) -> Option<&mut F> {
         self.file_state_mut(index).file_mut()
     }

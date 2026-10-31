@@ -67,6 +67,18 @@ impl<T: ?Sized + Unpin, P: Deref<Target = T>> InsertOnlyVec<T, P> {
             .map(|x| x as &T)
     }
 
+    /// Gets pinned elements in the requested order using a single lock.
+    pub fn get_many(&self, indexes: impl IntoIterator<Item = usize>) -> Option<Vec<&T>> {
+        let indexes: Vec<_> = indexes.into_iter().collect();
+        let guard = self.vec.lock().unwrap();
+        // Elements are pinned; growing the vector does not move their pointees.
+        let vec = unsafe { &*guard.get() };
+        indexes
+            .into_iter()
+            .map(|index| vec.get(index).map(|item| item as &T))
+            .collect()
+    }
+
     /*
      * TODO remove this?
     pub fn get_mut(&mut self, index: usize) -> Option<Pin<&mut T>> {
@@ -114,6 +126,29 @@ impl<T: ?Sized + Unpin, P: Deref<Target = T>> InsertOnlyVec<T, P> {
 
     pub fn as_vec_mut(&mut self) -> &mut Vec<Pin<P>> {
         self.vec.get_mut().unwrap().get_mut()
+    }
+}
+
+#[cfg(test)]
+mod insert_only_vec_batch_tests {
+    use super::InsertOnlyVec;
+
+    #[test]
+    fn batch_lookup_preserves_order_duplicates_and_pinned_references() {
+        let values: InsertOnlyVec<i32> = InsertOnlyVec::default();
+        values.push(Box::pin(10));
+        values.push(Box::pin(20));
+        let selected = values.get_many([1, 0, 1]).unwrap();
+        assert_eq!(selected, vec![&20, &10, &20]);
+        assert!(values.get_many([0, 2]).is_none());
+        let reentrant_indexes = [0, 1].into_iter().map(|index| {
+            assert!(values.get(index).is_some());
+            index
+        });
+        assert_eq!(values.get_many(reentrant_indexes).unwrap(), vec![&10, &20]);
+        values.push(Box::pin(30));
+        assert_eq!(selected, vec![&20, &10, &20]);
+        assert_eq!(values.get_many([]).unwrap(), Vec::<&i32>::new());
     }
 }
 
