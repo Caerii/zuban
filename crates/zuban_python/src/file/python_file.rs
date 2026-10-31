@@ -414,15 +414,8 @@ impl File for PythonFile {
         db: &'db Database,
         byte: CodeIndex,
     ) -> PositionInfos<'db> {
-        if let Some(super_file) = self.super_file
-            && let Some(offset) = super_file.offset
-        {
-            super_file
-                .file(db)
-                .byte_to_position_infos(db, offset + byte)
-        } else {
-            self.newline_indices.position_infos(self.tree.code(), byte)
-        }
+        let (file, byte) = self.source_file_and_offset(db, byte);
+        file.newline_indices.position_infos(file.tree.code(), byte)
     }
 
     fn diagnostics<'db>(&'db self, db: &'db Database) -> Box<[Diagnostic<'db>]> {
@@ -510,6 +503,21 @@ impl fmt::Debug for PythonFile {
 }
 
 impl<'db> PythonFile {
+    pub(crate) fn source_file_and_offset(
+        &'db self,
+        db: &'db Database,
+        mut byte: CodeIndex,
+    ) -> (&'db PythonFile, CodeIndex) {
+        let mut file = self;
+        while let Some(super_file) = file.super_file
+            && let Some(offset) = super_file.offset
+        {
+            byte += offset;
+            file = super_file.file(db);
+        }
+        (file, byte)
+    }
+
     pub(super) fn replayable_tail_name_stmt(&self) -> Option<(NodeIndex, Name<'_>)> {
         self.binding_snapshot.as_ref()?;
         let last = self.tree.last_stmt_like()?;

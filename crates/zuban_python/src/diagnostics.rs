@@ -770,6 +770,12 @@ impl<'db> Diagnostic<'db> {
             .byte_to_position_infos(self.db, self.issue.start_position)
     }
 
+    pub(crate) fn start_byte_position(&self) -> usize {
+        self.file
+            .source_file_and_offset(self.db, self.issue.start_position)
+            .1 as usize
+    }
+
     pub fn end_position(&self) -> PositionInfos<'db> {
         self.file
             .byte_to_position_infos(self.db, self.issue.end_position)
@@ -2786,6 +2792,50 @@ pub fn has_known_types_package(name: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_byte_sort_keys_match_positions_for_embedded_annotations() {
+        use crate::{Project, RunCause};
+        use config::ProjectOptions;
+        use vfs::PathWithScheme;
+
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/diagnostic-offsets.py")),
+        );
+        let source = "first: 'MissingFirst' = 1\nmiddle: int = 'wrong'\nlast: 'MissingLast' = 2\n";
+        project.store_in_memory_file(path, source.into());
+        let diagnostics = project.diagnostics().unwrap();
+        assert!(diagnostics.issues.len() >= 3);
+        assert!(diagnostics.issues.iter().any(|issue| {
+            issue
+                .file
+                .super_file
+                .is_some_and(|parent| parent.offset.is_some())
+        }));
+        for issue in &diagnostics.issues {
+            assert_eq!(
+                issue.start_byte_position(),
+                issue.start_position().byte_position
+            );
+        }
+        for name in ["MissingFirst", "MissingLast"] {
+            let expected = source.find(name).unwrap();
+            assert!(
+                diagnostics
+                    .issues
+                    .iter()
+                    .any(|issue| issue.start_byte_position() == expected)
+            );
+        }
+        assert!(diagnostics.issues.windows(2).all(|pair| {
+            pair[0].start_position().byte_position <= pair[1].start_position().byte_position
+        }));
+    }
+
     #[test]
     fn test_sizes() {
         use std::mem::size_of;

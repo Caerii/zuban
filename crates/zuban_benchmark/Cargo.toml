@@ -31,3 +31,7 @@ harness = false
 [[bench]]
 name = "binding_undo"
 harness = false
+
+[[bench]]
+name = "diagnostic_order"
+harness = false
