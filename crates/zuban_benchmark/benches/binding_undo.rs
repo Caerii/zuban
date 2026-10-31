@@ -29,11 +29,22 @@ fn binding_edit_undo(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("binding edit and undo");
     group.throughput(Throughput::Elements(u64::from(REFERENCES) * 2));
-    group.bench_function("64 references in 16k-definition file", |b| {
-        b.iter(|| {
-            for slot in 0..REFERENCES {
-                let line = DEFINITIONS + 2 + slot;
-                for replacement in ["delta", "alpha"] {
+    for (name, outstanding) in [
+        ("64 references in 16k-definition file", false),
+        ("64 outstanding references in 16k-definition file", true),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                for edit in 0..REFERENCES * 2 {
+                    let (slot, replacement) = if outstanding {
+                        (
+                            edit % REFERENCES,
+                            if edit < REFERENCES { "delta" } else { "alpha" },
+                        )
+                    } else {
+                        (edit / 2, if edit % 2 == 0 { "delta" } else { "alpha" })
+                    };
+                    let line = DEFINITIONS + 2 + slot;
                     project
                         .store_file_with_lsp_changes(
                             path.clone(),
@@ -52,10 +63,10 @@ fn binding_edit_undo(c: &mut Criterion) {
                         )
                         .unwrap();
                 }
-            }
-            assert_eq!(project.code_of_in_memory_file(&path).unwrap(), code);
+                assert_eq!(project.code_of_in_memory_file(&path).unwrap(), code);
+            });
         });
-    });
+    }
     group.finish();
     assert!(project.document(&path).unwrap().diagnostics().is_empty());
 }

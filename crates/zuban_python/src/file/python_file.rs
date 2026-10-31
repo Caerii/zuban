@@ -664,10 +664,8 @@ impl<'db> PythonFile {
         // Build the live points from the resulting snapshot. In particular, a
         // restored binding needs no overlay entry, and a compacted snapshot
         // already contains all changes in its base.
-        let binding_points = Points::from_binding_snapshot(snapshot.base.clone());
-        for &(index, point) in &snapshot.changes {
-            binding_points.set(index, point);
-        }
+        let binding_points =
+            Points::from_binding_snapshot(snapshot.base.clone(), &snapshot.changes);
         let (points, complex_points, replay_snapshot) =
             if let Some(reuse) = candidate.flow_reuse.take() {
                 let points = reuse.points;

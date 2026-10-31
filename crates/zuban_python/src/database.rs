@@ -473,10 +473,10 @@ impl Points {
         Self(PointsStorage::Dense(vec![Default::default(); length]))
     }
 
-    pub fn from_binding_snapshot(snapshot: Arc<[Point]>) -> Self {
+    pub fn from_binding_snapshot(snapshot: Arc<[Point]>, changes: &[(NodeIndex, Point)]) -> Self {
         Self(PointsStorage::Shared {
             base: snapshot,
-            changes: RwLock::new(HashMap::new()),
+            changes: RwLock::new(changes.iter().copied().collect()),
             materialized: OnceLock::new(),
         })
     }
@@ -2598,7 +2598,7 @@ mod tests {
     fn shared_points_keep_file_versions_independent_across_materialization() {
         let original = Point::new_specific(Specific::Analyzed, Locality::NameBinder);
         let changed = Point::new_specific(Specific::Calculating, Locality::NameBinder);
-        let points = Points::from_binding_snapshot(vec![original; 3].into());
+        let points = Points::from_binding_snapshot(vec![original; 3].into(), &[]);
         points.set(1, changed);
         let cloned = points.clone();
 
@@ -2623,7 +2623,7 @@ mod tests {
         let binding = Point::new_specific(Specific::Analyzed, Locality::NameBinder);
         let inferred = Point::new_specific(Specific::Calculating, Locality::Complex);
         for materialize_first in [false, true] {
-            let mut points = Points::from_binding_snapshot(vec![binding, binding].into());
+            let mut points = Points::from_binding_snapshot(vec![binding, binding].into(), &[]);
             points.set(1, inferred);
             if materialize_first {
                 points.materialize_for_inference();
