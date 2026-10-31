@@ -223,7 +223,7 @@ impl<'db> FileSelector<'db> {
                             .iter()
                             .any(|glob| glob.matches(vfs_handler, path.path()))
                         {
-                            self.handle_entry(in_dir, entry, true);
+                            self.handle_entry(in_dir, entry, true, None, &mut String::new());
                             false
                         } else {
                             true
@@ -274,6 +274,8 @@ impl<'db> FileSelector<'db> {
         parent_entries: &Entries,
         entry: &DirectoryEntry,
         parent_has_stub: bool,
+        borrowed_entries: Option<&FastHashMap<Arc<str>, DirectoryEntry>>,
+        stub_name: &mut String,
     ) {
         let handler = &*self.db.vfs.handler;
 
@@ -283,7 +285,13 @@ impl<'db> FileSelector<'db> {
                 if is_file_with_python_ending(&file.name)
                     && (flags.excludes.is_empty()
                         || !should_skip_dir_or_file(flags, &file.relative_path(handler)))
-                    && (!parent_has_stub || !ignore_py_if_overwritten_by_pyi(parent_entries, file))
+                    && (!parent_has_stub
+                        || !ignore_py_if_overwritten_by_pyi(
+                            parent_entries,
+                            borrowed_entries,
+                            file,
+                            stub_name,
+                        ))
                     && !self.ignored_by_gitignore(|| file.absolute_path(handler), false)
                 {
                     self.add_file(file.clone())
@@ -339,8 +347,9 @@ impl<'db> FileSelector<'db> {
         // Sorting entries by name to have at least some form of determinism by sorting
         sorted_entries.sort_by_key(|(key, _)| *key);
 
+        let mut stub_name = String::new();
         for (_, entry) in sorted_entries {
-            self.handle_entry(entries, entry, has_stub)
+            self.handle_entry(entries, entry, has_stub, Some(&borrowed), &mut stub_name)
         }
 
         if need_to_drop_gitignore {
@@ -349,13 +358,28 @@ impl<'db> FileSelector<'db> {
     }
 }
 
-fn ignore_py_if_overwritten_by_pyi(parent_entries: &Entries, file: &FileEntry) -> bool {
+fn ignore_py_if_overwritten_by_pyi(
+    parent_entries: &Entries,
+    borrowed_entries: Option<&FastHashMap<Arc<str>, DirectoryEntry>>,
+    file: &FileEntry,
+    stub_name: &mut String,
+) -> bool {
     if !file.name.ends_with(".py") {
         return false;
     }
-    parent_entries
-        .search(&format!("{}i", &file.name))
-        .is_some_and(|e| matches!(*e, DirectoryEntry::File(_)))
+    stub_name.clear();
+    stub_name.push_str(&file.name);
+    stub_name.push('i');
+    if let Some(entries) = borrowed_entries {
+        matches!(
+            entries.get(stub_name.as_str()),
+            Some(DirectoryEntry::File(_))
+        )
+    } else {
+        parent_entries
+            .search(stub_name)
+            .is_some_and(|e| matches!(*e, DirectoryEntry::File(_)))
+    }
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -426,6 +450,9 @@ mod tests {
                 ("ignored_dir/nested.py", "value: int = 'bad'\n"),
                 ("same.py", "value: int = 'bad'\n"),
                 ("same.pyi", "value: int\n"),
+                ("é.py", "value: int = 'bad'\n"),
+                ("é.pyi", "value: int\n"),
+                ("longer_module_name.py", "value: int = 'bad'\n"),
                 ("notes.txt", "value: int = 'bad'\n"),
             ]
             .into_iter()
@@ -441,8 +468,8 @@ mod tests {
             .collect();
             project.store_in_memory_files(files);
             let diagnostics = project.diagnostics().unwrap();
-            assert_eq!(diagnostics.checked_files, if excluded { 2 } else { 4 });
-            assert_eq!(diagnostics.issues.len(), if excluded { 1 } else { 3 });
+            assert_eq!(diagnostics.checked_files, if excluded { 4 } else { 6 });
+            assert_eq!(diagnostics.issues.len(), if excluded { 2 } else { 4 });
         }
     }
 }
