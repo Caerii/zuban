@@ -1,5 +1,5 @@
 use config::{ExcludeRegex, ProjectOptions};
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use vfs::{LocalFS, PathWithScheme, VfsHandler};
 use zuban_python::{Project, RunCause};
 
@@ -77,6 +77,43 @@ fn project_selection(c: &mut Criterion) {
     }
     selection_case(c, 1_000, true, true, false);
     selection_case(c, 1_000, true, false, true);
+    cold_project_check(c);
+}
+
+fn cold_project_check(c: &mut Criterion) {
+    const FILES: usize = 100;
+    let temp = tempfile::tempdir().expect("create project fixture");
+    for index in 0..FILES {
+        let dir = temp.path().join(format!("package_{}/nested", index / 10));
+        std::fs::create_dir_all(&dir).expect("create fixture directory");
+        std::fs::write(dir.join(format!("file_{index}.py")), "value: int = 1\n")
+            .expect("write fixture file");
+    }
+
+    let fs = LocalFS::without_watcher();
+    let mut options = ProjectOptions::default();
+    options.settings.typeshed_path = Some(test_utils::typeshed_path());
+    options.settings.add_global_packages_default = false;
+    options
+        .settings
+        .mypy_path
+        .push(fs.normalize_rc_path(fs.unchecked_abs_path(temp.path().to_str().unwrap())));
+
+    let mut group = c.benchmark_group("first project check");
+    group.throughput(Throughput::Elements(FILES as u64));
+    group.bench_function("100 files on disk", |b| {
+        b.iter_batched(
+            || Project::without_watcher(options.clone(), RunCause::TypeChecking),
+            |mut project| {
+                let diagnostics = project.diagnostics().expect("check fixture");
+                assert_eq!(diagnostics.checked_files, FILES);
+                assert!(diagnostics.issues.is_empty());
+                std::hint::black_box(diagnostics.checked_files);
+            },
+            BatchSize::PerIteration,
+        );
+    });
+    group.finish();
 }
 
 criterion_group!(benches, project_selection);

@@ -2730,6 +2730,7 @@ dependencies = [
  "criterion",
  "lsp-types",
  "parsa_python_cst",
+ "tempfile",
  "test_utils",
  "utils",
  "vfs",

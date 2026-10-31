@@ -18,6 +18,7 @@ zuban_python.workspace = true
 config.workspace = true
 vfs.workspace = true
 test_utils.workspace = true
+tempfile = "3"
 lsp-types.workspace = true
 
 [[bench]]
