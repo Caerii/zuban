@@ -158,6 +158,30 @@ fn cold_project_check(c: &mut Criterion) {
             std::hint::black_box(diagnostics.checked_files);
         });
     });
+
+    let overlay = PathWithScheme::with_file_scheme(
+        fs.normalize_rc_path(fs.unchecked_abs_path(temp.path().join("open.py").to_str().unwrap())),
+    );
+    let unchanged_file = fs.unchecked_abs_path(
+        temp.path()
+            .join("package_0/nested/file_1.py")
+            .to_str()
+            .unwrap(),
+    );
+    let unchanged_dir =
+        fs.unchecked_abs_path(temp.path().join("package_0/nested").to_str().unwrap());
+    project.store_in_memory_file(overlay.clone(), "value: int = 1\n".into());
+    for (name, path) in [
+        ("unchanged file event and buffer update", unchanged_file),
+        ("unchanged directory event and buffer update", unchanged_dir),
+    ] {
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                project.invalidate_path(&path);
+                project.store_in_memory_file(overlay.clone(), "value: int = 1\n".into());
+            });
+        });
+    }
 }
 
 criterion_group!(benches, project_selection);
