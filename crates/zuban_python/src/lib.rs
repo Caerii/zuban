@@ -1073,6 +1073,82 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn many_reference_edits_and_undos_match_fresh_bindings() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/many-reference-undo.py")),
+        );
+        let mut code = String::from("alpha = 1\ndelta = 'text'\n");
+        for index in 0..1_000 {
+            code.push_str(&format!("name_{index} = {index}\n"));
+        }
+        let reference_start = code.len();
+        for _ in 0..66 {
+            code.push_str("alpha\n");
+        }
+        code.push_str("wrong: int = 'text'\n");
+        project.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        let original_symbols = project.db.loaded_python_file(index).symbol_table.clone();
+
+        let edits = (0..64)
+            .map(|slot| (slot, "delta"))
+            .chain([(0, "alpha"), (64, "delta"), (65, "delta")])
+            .chain((1..66).map(|slot| (slot, "alpha")));
+        for (step, (slot, replacement)) in edits.enumerate() {
+            let start = reference_start + slot * 6;
+            code.replace_range(start..start + 5, replacement);
+            project
+                .store_file_with_lsp_changes(
+                    path.clone(),
+                    vec![TextDocumentContentChangeEvent {
+                        range: Some(Range::new(
+                            Position::new(1_002 + slot as u32, 0),
+                            Position::new(1_002 + slot as u32, 5),
+                        )),
+                        range_length: None,
+                        text: replacement.into(),
+                    }],
+                    |pos| InputPosition::Utf16CodeUnits {
+                        line: pos.line as usize,
+                        column: pos.character as usize,
+                    },
+                )
+                .unwrap();
+            let file = project.db.loaded_python_file(index);
+            assert!(Arc::ptr_eq(&original_symbols, &file.symbol_table));
+            if [63, 64, 65, 66, 131].contains(&step) {
+                let mut fresh = Project::without_watcher(options.clone(), RunCause::TypeChecking);
+                fresh.store_in_memory_file(path.clone(), code.clone().into_boxed_str());
+                let fresh_index = fresh.db.vfs.in_memory_file(&path).unwrap();
+                let fresh_file = fresh.db.loaded_python_file(fresh_index);
+                for slot in 0..66 {
+                    let start = (reference_start + slot * 6) as u32;
+                    let (_, GotoNode::Name(actual)) = file.tree.goto_node(start) else {
+                        panic!("expected incremental reference name");
+                    };
+                    let (_, GotoNode::Name(expected)) = fresh_file.tree.goto_node(start) else {
+                        panic!("expected fresh reference name");
+                    };
+                    assert_eq!(
+                        file.points.get(actual.index()),
+                        fresh_file.points.get(expected.index()),
+                        "binding mismatch at step {step}, slot {slot}"
+                    );
+                }
+                assert_eq!(
+                    format!("{:?}", project.document(&path).unwrap().diagnostics()),
+                    format!("{:?}", fresh.document(&path).unwrap().diagnostics()),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn length_changing_standalone_reference_reuses_binding() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());

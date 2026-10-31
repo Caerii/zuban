@@ -656,16 +656,18 @@ impl<'db> PythonFile {
             .with_needs_flow_analysis(
                 candidate.point.needs_flow_analysis() || definition_point.needs_flow_analysis(),
             );
-        let binding_points = Points::from_binding_snapshot(candidate.snapshot.base.clone());
-        for &(index, point) in &candidate.snapshot.changes {
-            binding_points.set(index, point);
-        }
-        binding_points.set(candidate.name_index, changed_point);
         let snapshot = Arc::new(
             candidate
                 .snapshot
                 .with_changed_point(candidate.name_index, changed_point),
         );
+        // Build the live points from the resulting snapshot. In particular, a
+        // restored binding needs no overlay entry, and a compacted snapshot
+        // already contains all changes in its base.
+        let binding_points = Points::from_binding_snapshot(snapshot.base.clone());
+        for &(index, point) in &snapshot.changes {
+            binding_points.set(index, point);
+        }
         let (points, complex_points, replay_snapshot) =
             if let Some(reuse) = candidate.flow_reuse.take() {
                 let points = reuse.points;
