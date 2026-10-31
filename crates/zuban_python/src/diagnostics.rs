@@ -776,6 +776,12 @@ impl<'db> Diagnostic<'db> {
             .1 as usize
     }
 
+    pub(crate) fn is_from_embedded_file(&self) -> bool {
+        self.file
+            .super_file
+            .is_some_and(|parent| parent.offset.is_some())
+    }
+
     pub fn end_position(&self) -> PositionInfos<'db> {
         self.file
             .byte_to_position_infos(self.db, self.issue.end_position)
@@ -2806,8 +2812,13 @@ mod tests {
         let path = PathWithScheme::with_file_scheme(
             vfs.normalize_rc_path(vfs.unchecked_abs_path("/diagnostic-offsets.py")),
         );
-        let source = "first: 'MissingFirst' = 1\nmiddle: int = 'wrong'\nlast: 'MissingLast' = 2\ncomposite: 'tuple[MissingLeft, MissingRight]' = ()\n";
-        project.store_in_memory_file(path.clone(), source.into());
+        let mut source = String::from(
+            "first: 'MissingFirst' = 1\nmiddle: int = 'wrong'\nlast: 'MissingLast' = 2\ncomposite: 'tuple[MissingLeft, MissingRight]' = ()\n",
+        );
+        for index in 0..80 {
+            source.push_str(&format!("value_{index}: 'UnknownType{index}' = 1\n"));
+        }
+        project.store_in_memory_file(path.clone(), source.clone().into_boxed_str());
         {
             let mut document = project.document(&path).unwrap();
             let issues = document.diagnostics();
@@ -2832,6 +2843,15 @@ mod tests {
         }
         for name in ["MissingFirst", "MissingLast", "MissingLeft", "MissingRight"] {
             let expected = source.find(name).unwrap();
+            assert!(
+                diagnostics
+                    .issues
+                    .iter()
+                    .any(|issue| issue.start_byte_position() == expected)
+            );
+        }
+        for index in 0..80 {
+            let expected = source.find(&format!("UnknownType{index}'")).unwrap();
             assert!(
                 diagnostics
                     .issues

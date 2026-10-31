@@ -421,7 +421,14 @@ impl File for PythonFile {
     fn diagnostics<'db>(&'db self, db: &'db Database) -> Box<[Diagnostic<'db>]> {
         let mut vec = Vec::new();
         self.collect_diagnostics(db, &mut vec);
-        vec.sort_by_key(|diag| diag.start_byte_position());
+        if vec.len() >= 64
+            && !self.sub_files.in_same_file.read().unwrap().is_empty()
+            && vec.iter().any(|diag| diag.is_from_embedded_file())
+        {
+            vec.sort_by_cached_key(|diag| diag.start_byte_position());
+        } else {
+            vec.sort_by_key(|diag| diag.start_byte_position());
+        }
         vec.into_boxed_slice()
     }
 }
