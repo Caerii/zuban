@@ -445,11 +445,64 @@ fn find_imports_and_preload_files(
 
 #[cfg(test)]
 mod tests {
-    use config::{ExcludeRegex, ProjectOptions};
+    use config::{DiagnosticConfig, ExcludeRegex, ProjectOptions};
+    use proptest::prelude::*;
     use vfs::{FileIndex, LocalFS, PathWithScheme, VfsHandler};
 
     use super::FileSelector;
     use crate::{Project, RunCause};
+
+    fn diagnostic_snapshot(project: &mut Project) -> (usize, usize, Vec<String>) {
+        let diagnostics = project.diagnostics().unwrap();
+        (
+            diagnostics.checked_files,
+            diagnostics.files_with_errors,
+            diagnostics
+                .issues
+                .iter()
+                .map(|issue| issue.as_string(&DiagnosticConfig::default(), None))
+                .collect(),
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn cached_selection_matches_fresh_selection_after_edits(
+            actions in proptest::collection::vec(0u8..6, 0..24)
+        ) {
+            let mut options = ProjectOptions::default();
+            options.settings.typeshed_path = Some(test_utils::typeshed_path());
+            options.settings.add_global_packages_default = false;
+            let fs = LocalFS::without_watcher();
+            options.settings.mypy_path.push(fs.normalize_rc_path(
+                fs.unchecked_abs_path("/selection-cache-property"),
+            ));
+            let path = |name: &str| PathWithScheme::with_file_scheme(fs.normalize_rc_path(
+                fs.unchecked_abs_path(&format!("/selection-cache-property/{name}")),
+            ));
+            let a = path("a.py");
+            let stub = path("a.pyi");
+            let b = path("b.py");
+            let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+            project.store_in_memory_file(a.clone(), "value: int = 1\n".into());
+            let _ = diagnostic_snapshot(&mut project);
+            for action in actions {
+                match action {
+                    0 => project.store_in_memory_file(a.clone(), "value: int = 1\n".into()),
+                    1 => project.store_in_memory_file(a.clone(), "value: int = 'bad'\n".into()),
+                    2 => project.store_in_memory_file(stub.clone(), "value: int = 'bad'\n".into()),
+                    3 => project.discard_in_memory_files(std::slice::from_ref(&stub)),
+                    4 => project.store_in_memory_file(b.clone(), "value: int = 'bad'\n".into()),
+                    _ => project.discard_in_memory_files(std::slice::from_ref(&b)),
+                }
+                let cached = diagnostic_snapshot(&mut project);
+                project.selection_cache = None;
+                let fresh = diagnostic_snapshot(&mut project);
+                prop_assert_eq!(cached, fresh);
+            }
+        }
+    }
 
     #[test]
     fn cached_selection_tracks_edits_and_stub_additions_and_removals() {
