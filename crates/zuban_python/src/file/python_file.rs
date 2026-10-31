@@ -285,6 +285,21 @@ impl BindingSnapshot {
     }
 
     fn with_changed_point(&self, index: NodeIndex, point: Point) -> Self {
+        let position = self
+            .changes
+            .iter()
+            .position(|(changed, _)| *changed == index);
+        if let Some(position) = position
+            && self.base[index as usize] == point
+        {
+            let mut changes = self.changes.clone();
+            changes.remove(position);
+            return Self {
+                base: self.base.clone(),
+                changes,
+                complex_prefix: self.complex_prefix.clone(),
+            };
+        }
         if self.changes.len() >= 64 {
             let mut base = self.base.to_vec();
             for &(changed, value) in &self.changes {
@@ -298,8 +313,8 @@ impl BindingSnapshot {
             };
         }
         let mut changes = self.changes.clone();
-        if let Some((_, existing)) = changes.iter_mut().find(|(changed, _)| *changed == index) {
-            *existing = point;
+        if let Some(position) = position {
+            changes[position].1 = point;
         } else {
             changes.push((index, point));
         }
@@ -1632,6 +1647,42 @@ fn add_error_if_typeshed_is_overwritten(file_entry: &FileEntry) -> Option<IssueK
 #[cfg(test)]
 mod stored_complex_point_tests {
     use super::*;
+
+    #[test]
+    fn binding_snapshot_reuses_base_for_repeated_edits_at_capacity() {
+        let original = Point::new_uncalculated();
+        let changed = Point::new_calculating();
+        let base: Arc<[Point]> = vec![original; 128].into();
+        let mut snapshot = BindingSnapshot {
+            base: base.clone(),
+            changes: Vec::new(),
+            complex_prefix: None,
+        };
+        for index in 0..64 {
+            snapshot = snapshot.with_changed_point(index, changed);
+        }
+
+        let updated = snapshot.with_changed_point(10, original);
+        assert!(Arc::ptr_eq(&base, &updated.base));
+        assert_eq!(updated.changes.len(), 63);
+        assert_eq!(snapshot.point(10), Some(changed));
+        assert_eq!(updated.point(10), Some(original));
+
+        let updated = updated.with_changed_point(64, changed);
+        assert!(Arc::ptr_eq(&base, &updated.base));
+        let compacted = updated.with_changed_point(65, changed);
+        assert!(!Arc::ptr_eq(&base, &compacted.base));
+        assert!(compacted.changes.is_empty());
+        for index in 0..128 {
+            let expected = if index < 66 && index != 10 {
+                changed
+            } else {
+                original
+            };
+            assert_eq!(compacted.point(index), Some(expected));
+        }
+        assert_eq!(compacted.point(128), None);
+    }
 
     #[test]
     fn module_symbol_analysis_does_not_complete_diagnostics() {
