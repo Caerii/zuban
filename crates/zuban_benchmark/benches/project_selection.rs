@@ -99,20 +99,40 @@ fn cold_project_check(c: &mut Criterion) {
         .mypy_path
         .push(fs.normalize_rc_path(fs.unchecked_abs_path(temp.path().to_str().unwrap())));
 
+    let root = fs.unchecked_abs_path(temp.path().to_str().unwrap());
     let mut group = c.benchmark_group("first project check");
     group.throughput(Throughput::Elements(FILES as u64));
-    group.bench_function("100 files on disk", |b| {
-        b.iter_batched(
-            || Project::without_watcher(options.clone(), RunCause::TypeChecking),
-            |mut project| {
-                let diagnostics = project.diagnostics().expect("check fixture");
-                assert_eq!(diagnostics.checked_files, FILES);
-                assert!(diagnostics.issues.is_empty());
-                std::hint::black_box(diagnostics.checked_files);
-            },
-            BatchSize::PerIteration,
-        );
-    });
+    for overlap in [false, true] {
+        let mut case_options = options.clone();
+        if overlap {
+            case_options
+                .settings
+                .set_files_or_directories_to_check(
+                    &fs,
+                    &root,
+                    None,
+                    [".".into(), "package_0".into()],
+                )
+                .expect("configure overlapping paths");
+        }
+        let name = if overlap {
+            "100 files with overlap"
+        } else {
+            "100 files on disk"
+        };
+        group.bench_function(name, |b| {
+            b.iter_batched(
+                || Project::without_watcher(case_options.clone(), RunCause::TypeChecking),
+                |mut project| {
+                    let diagnostics = project.diagnostics().expect("check fixture");
+                    assert_eq!(diagnostics.checked_files, FILES);
+                    assert!(diagnostics.issues.is_empty());
+                    std::hint::black_box(diagnostics.checked_files);
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
     group.finish();
 }
 
