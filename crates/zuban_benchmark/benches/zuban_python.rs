@@ -830,6 +830,16 @@ fn bench_type_checking(c: &mut Criterion) {
             unchanged_project.store_in_memory_file(unchanged_path.clone(), unchanged_code.clone())
         })
     });
+    let ignored_disk_path = unchanged_project
+        .vfs_handler()
+        .unchecked_abs_path("/bench-test/test1.py");
+    unchanged_project.store_in_memory_file(unchanged_path.clone(), unchanged_code.clone());
+    c.bench_function("ignored disk event and unchanged buffer among 1000", |b| {
+        b.iter(|| {
+            unchanged_project.invalidate_path(&ignored_disk_path);
+            unchanged_project.store_in_memory_file(unchanged_path.clone(), unchanged_code.clone());
+        })
+    });
     let (mut batch_project, batch_paths) = prepare_independent_files(1000);
     let batch_updated = unchanged_code
         .replace("return x", "return 1")

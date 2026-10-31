@@ -747,7 +747,6 @@ impl<F: VfsFile> Vfs<F> {
 
     pub fn invalidate_path(&mut self, case_sensitive: bool, path: &AbsPath) -> InvalidationResult {
         let _span = tracing::debug_span!("invalidate_path").entered();
-        self.advance_structure_epoch();
         let in_mem_path = PathWithScheme {
             path: self.handler.normalize_path(path).into_owned(),
             scheme: file_scheme(),
@@ -757,6 +756,7 @@ impl<F: VfsFile> Vfs<F> {
             tracing::debug!("Ignored invalidation, because the file is in-memory");
             return InvalidationResult::InvalidatedFiles;
         }
+        self.advance_structure_epoch();
         let mut invalidates_db = false;
         let mut all_unloads = FastHashSet::default();
         let mut all_invalidations = FastHashSet::<FileIndex>::default();

@@ -1942,6 +1942,49 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn ignored_disk_event_preserves_validated_editor_buffers() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let fs = project.vfs_handler();
+        let disk_path = fs.unchecked_abs_path("/ignored-disk-event.py");
+        let path = PathWithScheme::with_file_scheme(fs.normalize_rc_path(disk_path.clone()));
+        let other_buffer = PathWithScheme::with_file_scheme(
+            fs.normalize_rc_path(fs.unchecked_abs_path("/ignored-disk-event-other.py")),
+        );
+        project.store_in_memory_file(path.clone(), "x = 1\n".into());
+        project.store_in_memory_file(other_buffer.clone(), "y = 2\n".into());
+        project.store_in_memory_file(path.clone(), "x = 1\n".into());
+        project.invalidate_path(&disk_path);
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&path, "x = 1\n")
+                .is_some()
+        );
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&other_buffer, "y = 2\n")
+                .is_some()
+        );
+        let other = project
+            .vfs_handler()
+            .unchecked_abs_path("/another-disk-event.py");
+        project.invalidate_path(&other);
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&path, "x = 1\n")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn unchanged_buffer_shortcut_expires_after_workspace_change() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());
