@@ -223,7 +223,7 @@ impl<'db> FileSelector<'db> {
                             .iter()
                             .any(|glob| glob.matches(vfs_handler, path.path()))
                         {
-                            self.handle_entry(in_dir, entry);
+                            self.handle_entry(in_dir, entry, true);
                             false
                         } else {
                             true
@@ -269,7 +269,12 @@ impl<'db> FileSelector<'db> {
             .any(|gitignore| gitignore.is_path_ignored(&path, is_dir))
     }
 
-    fn handle_entry(&mut self, parent_entries: &Entries, entry: &DirectoryEntry) {
+    fn handle_entry(
+        &mut self,
+        parent_entries: &Entries,
+        entry: &DirectoryEntry,
+        parent_has_stub: bool,
+    ) {
         let handler = &*self.db.vfs.handler;
 
         match entry {
@@ -278,7 +283,7 @@ impl<'db> FileSelector<'db> {
                 if is_file_with_python_ending(&file.name)
                     && (flags.excludes.is_empty()
                         || !should_skip_dir_or_file(flags, &file.relative_path(handler)))
-                    && !ignore_py_if_overwritten_by_pyi(parent_entries, file)
+                    && (!parent_has_stub || !ignore_py_if_overwritten_by_pyi(parent_entries, file))
                     && !self.ignored_by_gitignore(|| file.absolute_path(handler), false)
                 {
                     self.add_file(file.clone())
@@ -316,12 +321,26 @@ impl<'db> FileSelector<'db> {
         }
 
         let borrowed = entries.borrow();
-        let mut sorted_entries: Vec<_> = borrowed.iter().filter(|(_, e)| !e.is_missing()).collect();
+        let mut has_stub = false;
+        let mut sorted_entries: Vec<_> = borrowed
+            .iter()
+            .filter_map(|(key, entry)| {
+                if entry.is_missing() {
+                    return None;
+                }
+                if let DirectoryEntry::File(file) = entry
+                    && file.name.ends_with(".pyi")
+                {
+                    has_stub = true;
+                }
+                Some((key, entry))
+            })
+            .collect();
         // Sorting entries by name to have at least some form of determinism by sorting
         sorted_entries.sort_by_key(|(key, _)| *key);
 
         for (_, entry) in sorted_entries {
-            self.handle_entry(entries, entry)
+            self.handle_entry(entries, entry, has_stub)
         }
 
         if need_to_drop_gitignore {
