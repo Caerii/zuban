@@ -134,6 +134,30 @@ fn cold_project_check(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    let edited_file = temp.path().join("package_0/nested/file_0.py");
+    let invalidated_path = fs.unchecked_abs_path(edited_file.to_str().unwrap());
+    let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+    let first = project.diagnostics().expect("check fixture before edits");
+    assert_eq!(first.checked_files, FILES);
+    assert!(first.issues.is_empty());
+    let mut has_error = false;
+    c.bench_function("disk edit and recheck 100 files", |b| {
+        b.iter(|| {
+            has_error = !has_error;
+            let code = if has_error {
+                "value: int = 'bad'\n"
+            } else {
+                "value: int = 1\n"
+            };
+            std::fs::write(&edited_file, code).expect("edit fixture file");
+            project.invalidate_path(&invalidated_path);
+            let diagnostics = project.diagnostics().expect("recheck fixture");
+            assert_eq!(diagnostics.checked_files, FILES);
+            assert_eq!(diagnostics.issues.len(), usize::from(has_error));
+            std::hint::black_box(diagnostics.checked_files);
+        });
+    });
 }
 
 criterion_group!(benches, project_selection);
