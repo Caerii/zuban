@@ -35,3 +35,7 @@ harness = false
 [[bench]]
 name = "diagnostic_order"
 harness = false
+
+[[bench]]
+name = "project_selection"
+harness = false

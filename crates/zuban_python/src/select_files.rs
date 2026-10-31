@@ -110,10 +110,10 @@ impl<'db> FileSelector<'db> {
             })
             // TODO shouldn't this be done before name binding?
             .filter(|o| {
-                let p = o.file.file_entry(db).relative_path(vfs_handler);
                 if let Some(more_specific_flags) = o.file.maybe_more_specific_flags(db) {
                     // We need to recheck, because we might have more specific information now for this
                     // file now that it's parsed.
+                    let p = o.file.file_entry(db).relative_path(vfs_handler);
                     if should_skip_file(more_specific_flags, &p) {
                         return false;
                     }
