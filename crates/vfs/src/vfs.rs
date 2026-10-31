@@ -480,10 +480,20 @@ impl<F: VfsFile> Vfs<F> {
         code: Box<str>,
         new_file: impl FnOnce(FileIndex, &FileEntry, Box<str>) -> F,
     ) -> (Option<FileIndex>, InvalidationResult) {
+        self.store_in_memory_source(case_sensitive, path, code, new_file)
+    }
+
+    pub fn store_in_memory_source<C: AsRef<str>>(
+        &mut self,
+        case_sensitive: bool,
+        path: PathWithScheme,
+        code: C,
+        new_file: impl FnOnce(FileIndex, &FileEntry, C) -> F,
+    ) -> (Option<FileIndex>, InvalidationResult) {
         tracing::info!("Loading in memory file: {}", &path.path);
-        let ensured = self
-            .workspaces
-            .ensure_file(&*self.handler, case_sensitive, &path, &code);
+        let ensured =
+            self.workspaces
+                .ensure_file(&*self.handler, case_sensitive, &path, code.as_ref());
 
         let file_entry = match ensured.kind {
             AddedKind::FileEntry(file_entry) => file_entry,
@@ -528,7 +538,7 @@ impl<F: VfsFile> Vfs<F> {
             if self
                 .file_state(file_index)
                 .file()
-                .is_some_and(|file| file.code_matches_input(&code))
+                .is_some_and(|file| file.code_matches_input(code.as_ref()))
             {
                 // It already exists with the same code, we can therefore skip generating a new
                 // file.

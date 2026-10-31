@@ -1739,10 +1739,12 @@ impl Database {
     ) {
         let mut invalidation = InvalidationResult::InvalidatedFiles;
         for (path, tree) in files {
-            let code = tree.code().into();
+            // The tree owns the source already; borrow it for VFS lookup and
+            // retain the original tree for the new file.
+            let source = tree.clone();
             invalidation |= self.store_in_memory_file_without_db_invalidation(
                 path,
-                code,
+                source.code(),
                 None,
                 None,
                 Some(tree),
@@ -1751,17 +1753,17 @@ impl Database {
         self.handle_invalidation(invalidation);
     }
 
-    fn store_in_memory_file_without_db_invalidation(
+    fn store_in_memory_file_without_db_invalidation<C: AsRef<str> + Into<Box<str>>>(
         &mut self,
         path: PathWithScheme,
-        code: Box<str>,
+        code: C,
         parent: Option<FileIndex>,
         syntax_candidate: Option<SyntaxReuseCandidate>,
         preparsed_tree: Option<Tree>,
     ) -> InvalidationResult {
         debug_assert!(syntax_candidate.is_none() || preparsed_tree.is_none());
         if parent.is_none()
-            && let Some(index) = self.vfs.unchanged_in_memory_file(&path, &code)
+            && let Some(index) = self.vfs.unchanged_in_memory_file(&path, code.as_ref())
             && self
                 .vfs
                 .file(index)
@@ -1793,12 +1795,13 @@ impl Database {
                 file.invalidate_references_to(super_file)
             }
         }
-        let (file_index, invalidation) = self.vfs.store_in_memory_file(
+        let (file_index, invalidation) = self.vfs.store_in_memory_source(
             self.project.flags.case_sensitive,
             path,
             code,
             |file_index, file_entry, new_code| {
                 let mut file = if let Some(candidate) = syntax_candidate {
+                    let new_code: Box<str> = new_code.into();
                     // The LSP single-edit path constructs this exact allocation
                     // from the old code and moves it through the VFS unchanged.
                     // A different allocation takes the fully validated path.
@@ -1864,7 +1867,7 @@ impl Database {
                     }
                 } else if let Some(tree) = preparsed_tree {
                     assert!(
-                        tree.code() == &*new_code,
+                        tree.code() == new_code.as_ref(),
                         "preparsed syntax must match the stored source"
                     );
                     PythonFile::new(&self.project, file_index, file_entry, tree)
@@ -1873,7 +1876,7 @@ impl Database {
                         &self.project,
                         file_index,
                         file_entry,
-                        new_code,
+                        new_code.into(),
                     )
                 };
                 file.super_file = parent.map(|file| SuperFile {

@@ -760,6 +760,40 @@ mod lsp_edit_tests {
     use super::*;
 
     #[test]
+    fn preparsed_file_storage_shares_source_and_updates_diagnostics() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        let vfs = project.vfs_handler();
+        let path = PathWithScheme::with_file_scheme(
+            vfs.normalize_rc_path(vfs.unchecked_abs_path("/preparsed-source.py")),
+        );
+        let tree = Tree::parse("value: int = 'bad'\n".into());
+        let source_address = tree.code().as_ptr();
+        project.store_in_memory_files_preparsed_for_tests(vec![(path.clone(), tree.clone())]);
+        let index = project.db.vfs.in_memory_file(&path).unwrap();
+        assert_eq!(
+            project.db.loaded_python_file(index).tree.code().as_ptr(),
+            source_address
+        );
+        assert_eq!(project.document(&path).unwrap().diagnostics().len(), 1);
+
+        // A repeated store keeps the existing file, while changed source must
+        // invalidate the old diagnostics and retain the replacement tree.
+        project.store_in_memory_files_preparsed_for_tests(vec![(path.clone(), tree)]);
+        assert_eq!(project.document(&path).unwrap().diagnostics().len(), 1);
+        let replacement = Tree::parse("value: int = 1\n".into());
+        let replacement_address = replacement.code().as_ptr();
+        project.store_in_memory_files_preparsed_for_tests(vec![(path.clone(), replacement)]);
+        assert_eq!(
+            project.db.loaded_python_file(index).tree.code().as_ptr(),
+            replacement_address
+        );
+        assert!(project.document(&path).unwrap().diagnostics().is_empty());
+    }
+
+    #[test]
     fn same_length_name_edit_rebinds_symbols_and_diagnostics() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());
