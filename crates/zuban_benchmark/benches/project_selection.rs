@@ -77,7 +77,44 @@ fn project_selection(c: &mut Criterion) {
     }
     selection_case(c, 1_000, true, true, false);
     selection_case(c, 1_000, true, false, true);
+    cached_many_file_diagnostics(c);
     cold_project_check(c);
+}
+
+fn cached_many_file_diagnostics(c: &mut Criterion) {
+    const FILES: usize = 1_000;
+    let fs = LocalFS::without_watcher();
+    let mut options = ProjectOptions::default();
+    options.settings.typeshed_path = Some(test_utils::typeshed_path());
+    options.settings.add_global_packages_default = false;
+    options
+        .settings
+        .mypy_path
+        .push(fs.normalize_rc_path(fs.unchecked_abs_path("/diagnostic-collection-benchmark")));
+    let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+    let files = (0..FILES)
+        .map(|index| {
+            let path = format!("/diagnostic-collection-benchmark/file_{index}.py");
+            (
+                PathWithScheme::with_file_scheme(
+                    fs.normalize_rc_path(fs.unchecked_abs_path(&path)),
+                ),
+                "value: int = 'bad'\n".into(),
+            )
+        })
+        .collect();
+    project.store_in_memory_files(files);
+    let first = project.diagnostics().unwrap();
+    assert_eq!(first.checked_files, FILES);
+    assert_eq!(first.issues.len(), FILES);
+    c.bench_function("cached check of 1000 files with one error each", |b| {
+        b.iter(|| {
+            let diagnostics = project.diagnostics().unwrap();
+            assert_eq!(diagnostics.checked_files, FILES);
+            assert_eq!(diagnostics.issues.len(), FILES);
+            std::hint::black_box(diagnostics);
+        });
+    });
 }
 
 fn cold_project_check(c: &mut Criterion) {

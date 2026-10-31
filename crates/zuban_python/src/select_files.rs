@@ -26,7 +26,7 @@ pub(crate) struct SelectionCache {
 pub(crate) fn diagnostics_for_relevant_files<'db>(
     db: &'db Database,
     cache: &mut Option<SelectionCache>,
-    on_file: impl FnMut(&'db PythonFile) -> Vec<Diagnostic<'db>>,
+    on_file: impl FnMut(&'db PythonFile, &mut Vec<Diagnostic<'db>>),
 ) -> anyhow::Result<Vec<Diagnostic<'db>>> {
     let epoch = db.vfs.structure_epoch();
     if let Some(cache) = cache.as_ref()
@@ -67,8 +67,9 @@ pub(crate) fn diagnostics_for_relevant_files<'db>(
 fn diagnostics_for_selected_files<'db>(
     db: &'db Database,
     files: impl Iterator<Item = &'db PythonFile>,
-    mut on_file: impl FnMut(&'db PythonFile) -> Vec<Diagnostic<'db>>,
+    mut on_file: impl FnMut(&'db PythonFile, &mut Vec<Diagnostic<'db>>),
 ) -> Vec<Diagnostic<'db>> {
+    let mut result = Vec::new();
     files
         .filter(|file| {
             if let Some(flags) = file.maybe_more_specific_flags(db) {
@@ -78,12 +79,8 @@ fn diagnostics_for_selected_files<'db>(
                 true
             }
         })
-        .map(&mut on_file)
-        .reduce(|mut vec1, vec2| {
-            vec1.extend(vec2);
-            vec1
-        })
-        .unwrap_or_default()
+        .for_each(|file| on_file(file, &mut result));
+    result
 }
 
 pub(crate) fn all_typechecked_files(db: &Database) -> (OrderedFileIndexes, Vec<ToBeLoaded>) {
@@ -521,6 +518,54 @@ mod tests {
                 prop_assert_eq!(cached, fresh);
             }
         }
+    }
+
+    #[test]
+    fn project_diagnostics_match_ordered_per_file_diagnostics() {
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        let fs = LocalFS::without_watcher();
+        options
+            .settings
+            .mypy_path
+            .push(fs.normalize_rc_path(fs.unchecked_abs_path("/diagnostic-collection-order")));
+        let path = |name: &str| {
+            PathWithScheme::with_file_scheme(fs.normalize_rc_path(
+                fs.unchecked_abs_path(&format!("/diagnostic-collection-order/{name}")),
+            ))
+        };
+        let a = path("a.py");
+        let b = path("b.py");
+        let mut code = String::new();
+        for index in 0..128 {
+            code.push_str(&format!("value_{index}: 'MissingType{index}' = 1\n"));
+        }
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        project.store_in_memory_files(vec![
+            (a.clone(), code.into_boxed_str()),
+            (b.clone(), "z: int = 'bad'\ny: int = 'bad'\n".into()),
+        ]);
+        let mut expected = Vec::new();
+        for path in [&a, &b] {
+            let mut document = project.document(path).unwrap();
+            expected.extend(
+                document
+                    .diagnostics()
+                    .iter()
+                    .map(|issue| issue.as_string(&DiagnosticConfig::default(), None)),
+            );
+        }
+        assert_eq!(expected.len(), 130);
+        let diagnostics = project.diagnostics().unwrap();
+        let actual: Vec<_> = diagnostics
+            .issues
+            .iter()
+            .map(|issue| issue.as_string(&DiagnosticConfig::default(), None))
+            .collect();
+        assert_eq!(diagnostics.checked_files, 2);
+        assert_eq!(diagnostics.files_with_errors, 2);
+        assert_eq!(actual, expected);
     }
 
     #[test]

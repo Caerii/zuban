@@ -420,15 +420,7 @@ impl File for PythonFile {
 
     fn diagnostics<'db>(&'db self, db: &'db Database) -> Box<[Diagnostic<'db>]> {
         let mut vec = Vec::new();
-        self.collect_diagnostics(db, &mut vec);
-        if vec.len() >= 64
-            && !self.sub_files.in_same_file.read().unwrap().is_empty()
-            && vec.iter().any(|diag| diag.is_from_embedded_file())
-        {
-            vec.sort_by_cached_key(|diag| diag.start_byte_position());
-        } else {
-            vec.sort_by_key(|diag| diag.start_byte_position());
-        }
+        self.append_sorted_diagnostics(db, &mut vec);
         vec.into_boxed_slice()
     }
 }
@@ -487,6 +479,24 @@ impl fmt::Debug for PythonFile {
 }
 
 impl<'db> PythonFile {
+    pub(crate) fn append_sorted_diagnostics(
+        &'db self,
+        db: &'db Database,
+        result: &mut Vec<Diagnostic<'db>>,
+    ) {
+        let start = result.len();
+        self.collect_diagnostics(db, result);
+        let added = &mut result[start..];
+        if added.len() >= 64
+            && !self.sub_files.in_same_file.read().unwrap().is_empty()
+            && added.iter().any(|diag| diag.is_from_embedded_file())
+        {
+            added.sort_by_cached_key(|diag| diag.start_byte_position());
+        } else {
+            added.sort_by_key(|diag| diag.start_byte_position());
+        }
+    }
+
     fn collect_diagnostics(&'db self, db: &'db Database, result: &mut Vec<Diagnostic<'db>>) {
         if self
             .super_file

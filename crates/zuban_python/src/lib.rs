@@ -328,13 +328,13 @@ impl Project {
         let issues = select_files::diagnostics_for_relevant_files(
             &self.db,
             &mut self.selection_cache,
-            |file| {
+            |file, issues| {
                 checked_files += 1;
-                let issues = file.diagnostics(&self.db).into_vec();
-                if !issues.is_empty() {
+                let previous_len = issues.len();
+                file.append_sorted_diagnostics(&self.db, issues);
+                if issues.len() != previous_len {
                     files_with_errors += 1;
                 }
-                issues
             },
         )?;
         tracing::info!("Checked {checked_files} files ({files_with_errors} files had errors)");
