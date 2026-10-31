@@ -877,6 +877,7 @@ impl<F: VfsFile> Vfs<F> {
                             .is_some_and(|entry| matches!(*entry, DirectoryEntry::MissingEntry(_)))
                         {
                             tracing::debug!("Missing entry is still missing, no changes needed");
+                            ignored_invalidation = true;
                         } else {
                             tracing::debug!("Decided to remove {replace_name} from VFS");
                             if let Some(r) = in_dir.remove_name(replace_name) {

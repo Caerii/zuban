@@ -1942,6 +1942,48 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn still_missing_file_event_preserves_buffers_and_creation_refreshes_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_file = temp.path().join("missing_mod.py");
+        std::fs::write(
+            temp.path().join("main.py"),
+            "from missing_mod import value\nx: int = value\n",
+        )
+        .unwrap();
+        let fs = LocalFS::without_watcher();
+        let root = fs.unchecked_abs_path(temp.path().to_str().unwrap());
+        let missing_path = fs.unchecked_abs_path(missing_file.to_str().unwrap());
+        let overlay = PathWithScheme::with_file_scheme(fs.normalize_rc_path(
+            fs.unchecked_abs_path(temp.path().join("open.py").to_str().unwrap()),
+        ));
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        options.settings.mypy_path.push(fs.normalize_rc_path(root));
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        assert!(!project.diagnostics().unwrap().issues.is_empty());
+        project.store_in_memory_file(overlay.clone(), "y = 2\n".into());
+        project.invalidate_path(&missing_path);
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&overlay, "y = 2\n")
+                .is_some()
+        );
+        std::fs::write(&missing_file, "value: int = 1\n").unwrap();
+        project.invalidate_path(&missing_path);
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&overlay, "y = 2\n")
+                .is_none()
+        );
+        assert!(project.diagnostics().unwrap().issues.is_empty());
+    }
+
+    #[test]
     fn unchanged_disk_file_event_preserves_validated_buffers() {
         let temp = tempfile::tempdir().unwrap();
         let disk_file = temp.path().join("on_disk.py");
