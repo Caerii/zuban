@@ -2761,6 +2761,7 @@ dependencies = [
  "serde_json",
  "shlex",
  "smallvec",
+ "tempfile",
  "test_utils",
  "tracing",
  "utils",

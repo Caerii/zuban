@@ -1942,6 +1942,44 @@ mod lsp_edit_tests {
     }
 
     #[test]
+    fn ignored_directory_event_preserves_validated_buffers() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(temp.path().join("on_disk.py"), "x = 1\n").unwrap();
+        let fs = LocalFS::without_watcher();
+        let root = fs.unchecked_abs_path(temp.path().to_str().unwrap());
+        let child_path = fs.unchecked_abs_path(child.to_str().unwrap());
+        let overlay_path = PathWithScheme::with_file_scheme(fs.normalize_rc_path(
+            fs.unchecked_abs_path(temp.path().join("open.py").to_str().unwrap()),
+        ));
+        let mut options = ProjectOptions::default();
+        options.settings.typeshed_path = Some(test_utils::typeshed_path());
+        options.settings.add_global_packages_default = false;
+        options.settings.mypy_path.push(fs.normalize_rc_path(root));
+        let mut project = Project::without_watcher(options, RunCause::TypeChecking);
+        project.diagnostics().unwrap();
+        project.store_in_memory_file(overlay_path.clone(), "y = 2\n".into());
+        project.invalidate_path(&child_path);
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&overlay_path, "y = 2\n")
+                .is_some()
+        );
+        std::fs::remove_dir(&child).unwrap();
+        project.invalidate_path(&child_path);
+        assert!(
+            project
+                .db
+                .vfs
+                .unchanged_in_memory_file(&overlay_path, "y = 2\n")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn ignored_disk_event_preserves_validated_editor_buffers() {
         let mut options = ProjectOptions::default();
         options.settings.typeshed_path = Some(test_utils::typeshed_path());

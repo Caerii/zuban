@@ -39,6 +39,7 @@ test_utils.workspace = true
 logging_config.workspace = true
 shlex = "*"
 proptest = "1"
+tempfile = "3"
 
 [features]
 zuban_debug = []

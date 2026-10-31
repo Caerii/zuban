@@ -756,8 +756,8 @@ impl<F: VfsFile> Vfs<F> {
             tracing::debug!("Ignored invalidation, because the file is in-memory");
             return InvalidationResult::InvalidatedFiles;
         }
-        self.advance_structure_epoch();
         let mut invalidates_db = false;
+        let mut ignored_invalidation = false;
         let mut all_unloads = FastHashSet::default();
         let mut all_invalidations = FastHashSet::<FileIndex>::default();
         let mut ensure_unloaded_in_memory_paths = vec![];
@@ -838,6 +838,7 @@ impl<F: VfsFile> Vfs<F> {
                     tracing::debug!(
                         "Ignored invalidation for {path}, because it is an unnecessary invalidation"
                     );
+                    ignored_invalidation = true;
                     return;
                 }
                 let new_entry = self.handler.read_and_watch_entry_for_invalidation(
@@ -886,6 +887,11 @@ impl<F: VfsFile> Vfs<F> {
             })
         }
 
+        if ignored_invalidation {
+            return InvalidationResult::InvalidatedFiles;
+        }
+        // Ignored notifications leave the workspace structure unchanged.
+        self.advance_structure_epoch();
         let invalidation_len = all_invalidations.len();
         let unload_len = all_unloads.len();
         if invalidates_db {
