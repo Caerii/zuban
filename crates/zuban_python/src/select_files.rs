@@ -15,7 +15,7 @@ use crate::{
     utils::{is_file_with_python_ending, join_with_commas},
 };
 
-type ToBeLoaded = (usize, Arc<FileEntry>, PathWithScheme);
+type ToBeLoaded = (usize, Arc<FileEntry>);
 type OrderedFileIndexes = FastHashMap<FileIndex, usize>;
 
 pub(crate) fn diagnostics_for_relevant_files<'db>(
@@ -92,7 +92,7 @@ impl<'db> FileSelector<'db> {
         selector
             .to_be_loaded
             .par_iter()
-            .for_each(|(order_index, file, _)| {
+            .for_each(|(order_index, file)| {
                 if let Some(file) = db.load_file_from_workspace(file) {
                     selector.add_file_index(*order_index, file.file_index);
                     find_imports_and_preload_files(db, file, &loaded_file_entries)
@@ -250,8 +250,7 @@ impl<'db> FileSelector<'db> {
                 .entry(file_index)
                 .or_insert(order_index);
         } else {
-            let path = file.absolute_path(&*self.db.vfs.handler);
-            self.to_be_loaded.push((order_index, file, path));
+            self.to_be_loaded.push((order_index, file));
         }
     }
 
